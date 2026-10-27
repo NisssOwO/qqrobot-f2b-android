@@ -83,7 +83,7 @@ public final class QQRobotFirstRun {
                     target.setExecutable(true, false);
                 }
             } catch (IOException e) {
-                Logger.logError(LOG_TAG, "Failed to copy asset " + assetName, e);
+                Logger.logError(LOG_TAG, "Failed to copy asset " + assetName + ": " + e.getMessage());
                 ok = false;
             }
         }
