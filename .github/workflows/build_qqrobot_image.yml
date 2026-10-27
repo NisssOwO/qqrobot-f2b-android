@@ -39,8 +39,6 @@ concurrency:
 
 env:
   QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.0' }}
-  # Tag pushes always publish; manual runs only when explicitly requested.
-  QQROBOT_PUBLISH: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
 
 jobs:
   build-image:
@@ -153,8 +151,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-image]
     # Verification builds (publish=false) stop after the artifact is uploaded,
-    # so a broken image never becomes a published release.
-    if: ${{ env.QQROBOT_PUBLISH == 'true' }}
+    # so a broken image never becomes a published release. Job-level `if` cannot
+    # read the env context (GitHub rejects the workflow), hence the inline test.
+    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v6
