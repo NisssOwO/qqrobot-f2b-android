@@ -13,7 +13,7 @@ export function validateModelConfig(raw, previous = null) {
   if (previous && raw.apiKey === '' && url.href.replace(/\/$/, '') !== previous.baseUrl) throw new TypeError('更换地址时必须重新填写密钥');
   return { baseUrl: url.href.replace(/\/$/, ''), model: raw.model, apiKey, revision: randomBytes(12).toString('hex') };
 }
-export function createModelPreview({ root, dataDir, roleIds, chatFactory = createConversation }) {
+export function createModelPreview({ root, dataDir, roleIds, chatFactory = createConversation, onChange = null }) {
   const file = path.join(dataDir, 'model-config.json');
   let config = null, chat = null, busy = false;
   const guard = globalThis[Symbol.for('qqrobot.termux.c.guard')];
@@ -28,6 +28,7 @@ export function createModelPreview({ root, dataDir, roleIds, chatFactory = creat
   const status = () => ({ configured: !!config, busy, baseUrl: config?.baseUrl ?? '', model: config?.model ?? '', keyPresent: !!config?.apiKey, scope: 'local-preview-only' });
   return {
     status,
+    current: () => config,
     async configure(input) {
       if (busy) throw new Error('试聊进行中，请稍后修改配置');
       const next = validateModelConfig(input, config);
@@ -36,6 +37,7 @@ export function createModelPreview({ root, dataDir, roleIds, chatFactory = creat
         // Persist first; a write failure must leave the prior usable config intact.
         atomicJson(file, next);
         await chat?.close(); chat = null; config = next; egress(next.baseUrl);
+        if (onChange) await onChange(config);
       } finally { busy = false; }
       return status();
     },
@@ -45,6 +47,7 @@ export function createModelPreview({ root, dataDir, roleIds, chatFactory = creat
       try {
         if (fs.existsSync(file)) fs.unlinkSync(file);
         await chat?.close(); chat = null; config = null; egress(null);
+        if (onChange) await onChange(null);
       } finally { busy = false; }
       return status();
     },

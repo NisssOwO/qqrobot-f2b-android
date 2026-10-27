@@ -92,7 +92,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   const gateway = gatewayConfig(cfg, cfg.policy.selfId);
   if (gateway) atomicJson(configFile, { ...cfg, gateway });
   const quiet = new QuietHours({ config: cfg.quietHours, stateDir: dataDir });
-  const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory });
+  const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory, onChange: cfg => applyReplyModel(cfg) });
   const token = randomBytes(32).toString('hex');
   let origin, chat, bridge, onebotPort = null, receiptCounter = 0, switching = false;
   const modelRequests = [];
@@ -271,6 +271,25 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   // baseUrl; keep it loopback so proxy/chat traffic never leaves the host.
   origin = `http://127.0.0.1:${boundPort}`;
   chat = createConversation({ root: ROOT, dataDir, baseUrl: origin + '/fixture/v1', apiKey: token });
+  // The QQ reply path prefers the model configured in the panel and falls back
+  // to the built-in fixture so the bot still answers when nothing is set. The
+  // switch happens on configure/clear, never silently in the middle of a reply.
+  let replyChat = chat;
+  let replyModel = null;
+  // Building a real conversation is deferred to the first reply: configuring a
+  // model must not open upstream state before anyone actually talks to the bot.
+  function applyReplyModel(cfg) {
+    const previous = replyChat;
+    replyModel = cfg || null;
+    replyChat = cfg ? null : chat;
+    if (previous && previous !== chat && previous !== replyChat) { try { previous.close().catch(() => {}); } catch {} }
+  }
+  function replyConversation() {
+    if (!replyModel) return chat;
+    replyChat ??= (previewChatFactory ?? createConversation)({ root: ROOT, dataDir, baseUrl: replyModel.baseUrl, apiKey: replyModel.apiKey, model: replyModel.model, timeoutMs: 60000 });
+    return replyChat;
+  }
+  applyReplyModel(preview.current());
   let gatewayBridge = null;
   if (gateway) {
     // Explicit, single-use local OneBot gateway. No automatic reconnects: a
@@ -281,7 +300,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   }
   bridge = new TextBridge({ sdk, dataDir, policy: cfg.policy, roleIds: roles.map(r => r.id), quiet, now, knownSecrets: [token], sendRate: sendRate ?? {}, gatewayBacked: !!gateway,
     normalizeMessage: gateway ? normalizeOneBotMessage : undefined,
-    respond: event => chat.reply(event),
+    respond: event => replyConversation().reply(event),
     sendText: gateway ? req => gatewayBridge.sendText(req) : async () => `mock-${++receiptCounter}` });
   if (gateway) {
     try { await gatewayBridge.connect({ enabled: true }); }
