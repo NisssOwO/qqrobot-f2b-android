@@ -109,7 +109,11 @@ jobs:
           trap - EXIT
 
           # LAN guard: binding to 0.0.0.0 without a password must fail fast.
-          if docker run --rm -e QQROBOT_SKIP_QQ=1 -e QQROBOT_BIND=0.0.0.0 qqrobot:arm64 2>&1 | grep -q QQROBOT_PASSWORD; then
+          # `|| true`: the container exits non-zero by design, and under
+          # `set -o pipefail` that alone would make the pipeline look failed.
+          guard_out="$(docker run --rm -e QQROBOT_SKIP_QQ=1 -e QQROBOT_BIND=0.0.0.0 qqrobot:arm64 2>&1 || true)"
+          printf '%s\n' "$guard_out"
+          if printf '%s' "$guard_out" | grep -q QQROBOT_PASSWORD; then
             echo "LAN password guard OK"
           else
             echo "LAN password guard did not trigger"; exit 1
