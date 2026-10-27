@@ -13,10 +13,10 @@
 #   QQ_ACCOUNT        机器人 QQ 号，默认 3836367204
 #   GROUP_ALLOW       允许的群号，默认 620765931
 #   QQROBOT_DATA_DIR  数据目录，默认 $HOME/qqrobot-data
-#   QQROBOT_VERSION   镜像版本，默认 0.2.0
+#   QQROBOT_VERSION   镜像版本，默认 0.2.1
 set -eu
 
-VERSION="${QQROBOT_VERSION:-0.2.0}"
+VERSION="${QQROBOT_VERSION:-0.2.1}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"
 BIND="${QQROBOT_BIND:-127.0.0.1}"
 PORT="${QQROBOT_PORT:-38121}"
