@@ -4,25 +4,34 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Keep in sync with non-adaptive ic_launcher.xml -->
+    <!-- QQ聊天机器人 placeholder foreground: white speech bubble + 3 brand dots,
+         centered in the adaptive-icon safe zone (66x66dp around center 54,54).
+         Keep in sync with the legacy PNG icons (icons/gen-icons.ps1). -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M34,38
-                          h6
-                          l12,16
-                          l-12,16
+        android:pathData="M33,34
+                          h42
+                          a10,10 0 0 1 10,10
+                          v24
+                          a10,10 0 0 1 -10,10
+                          H48
+                          l-9,11
+                          v-11
                           h-6
-                          l12,-16
-                          "
+                          a10,10 0 0 1 -10,-10
+                          V44
+                          a10,10 0 0 1 10,-10
+                          z"
         />
 
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M56,66
-                          h18
-                          v4
-                          h-18
-                          "
-        />
+        android:fillColor="#1F2E63"
+        android:pathData="M37,53 a4.5,4.5 0 1 0 9,0 a4.5,4.5 0 1 0 -9,0" />
+    <path
+        android:fillColor="#1F2E63"
+        android:pathData="M49.5,53 a4.5,4.5 0 1 0 9,0 a4.5,4.5 0 1 0 -9,0" />
+    <path
+        android:fillColor="#1F2E63"
+        android:pathData="M62,53 a4.5,4.5 0 1 0 9,0 a4.5,4.5 0 1 0 -9,0" />
 
 </vector>
