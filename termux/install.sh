@@ -107,7 +107,8 @@ else
 fi
 
 # --- 5. 建容器（不启动） -----------------------------------------------------
-if udocker ps -a 2>/dev/null | grep -q 'qqrobot'; then
+# 注意: udocker ps 不支持 -a/-l，直接 ps 列出全部容器（含已停止）
+if udocker ps 2>/dev/null | grep -q 'qqrobot'; then
   say "容器已存在，跳过创建"
 else
   udocker create --name=qqrobot "qqrobot:${VERSION}" || die "udocker create 失败"
