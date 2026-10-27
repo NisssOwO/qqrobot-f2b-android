@@ -4,7 +4,26 @@
 set -eu
 NAP_BASE="/root/Napcat/opt/QQ/resources/app/app_launcher/napcat"
 NAP_CONFIG="${NAP_BASE}/config"
-DATA="${QQROBOT_DATA_DIR:-/root/qqrobot-data}"
+DATA="${QQROBOT_DATA_DIR:-/data}"
+
+mkdir -p "${DATA}" "${DATA}/napcat-config"
+
+# 0) NapCat 配置目录搬进数据卷（保持登录态/账号配置跨容器重建不丢）
+#    容器内 /root 不随镜像层持久化; /data 是挂载卷。
+if [ -L "${NAP_CONFIG}" ]; then
+  : # 已经是软链，且目标在数据卷里
+elif [ -d "${NAP_CONFIG}" ]; then
+  # 镜像里预置的模板：内容搬到数据卷（只在卷里为空时搬，避免覆盖已有配置）
+  if [ -z "$(ls -A "${DATA}/napcat-config" 2>/dev/null)" ]; then
+    cp -a "${NAP_CONFIG}/." "${DATA}/napcat-config/" 2>/dev/null || true
+  fi
+  rm -rf "${NAP_CONFIG}"
+  ln -s "${DATA}/napcat-config" "${NAP_CONFIG}"
+  echo "linked napcat config -> ${DATA}/napcat-config"
+else
+  ln -s "${DATA}/napcat-config" "${NAP_CONFIG}"
+  echo "linked napcat config -> ${DATA}/napcat-config (created)"
+fi
 
 mkdir -p "${NAP_CONFIG}" "${DATA}"
 

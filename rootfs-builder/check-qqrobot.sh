@@ -3,7 +3,7 @@
 # 退出码: 0=全部就绪 1=部分缺失 2=严重缺失
 set +e
 export HOME=/root
-export QQROBOT_DATA_DIR="${QQROBOT_DATA_DIR:-/root/qqrobot-data}"
+export QQROBOT_DATA_DIR="${QQROBOT_DATA_DIR:-/data}"
 FAIL=0
 
 echo "== QQROBOT_CHECK $(date) =="

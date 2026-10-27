@@ -1,5 +1,7 @@
 **/data/.runtime
+**/data-lan-test
+**/node_modules
 **/run.log
 **/*.log
-**/node_modules
+**/lan-log*.txt
 .git

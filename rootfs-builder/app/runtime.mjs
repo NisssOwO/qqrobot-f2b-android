@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as sdk from '@acidify/core';
 import { QuietHours, parseHm } from './src/quiet-hours.mjs';
@@ -52,7 +52,7 @@ function validSendRate(raw) {
   if (Number.isInteger(maxSendPerHour)) next.maxSendPerHour = maxSendPerHour;
   return Object.keys(next).length ? Object.freeze(next) : null;
 }
-export async function createApplication({ dataDir = path.join(ROOT, 'data'), serviceDataDir, port = 0, now = Date.now, fixtureModel, previewChatFactory } = {}) {
+export async function createApplication({ dataDir = path.join(ROOT, 'data'), serviceDataDir, port = 0, bind = '127.0.0.1', password = '', allowedHosts, now = Date.now, fixtureModel, previewChatFactory } = {}) {
   dataDir = path.resolve(dataDir); fs.mkdirSync(dataDir, { recursive: true });
   serviceDataDir = path.resolve(serviceDataDir ?? dataDir);
   const configFile = path.join(dataDir, 'config.json');
@@ -67,6 +67,46 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   let origin, chat, bridge, onebotPort = null, receiptCounter = 0, switching = false;
   const modelRequests = [];
   function json(res, status, data) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
+
+  // --- LAN exposure (opt-in) -------------------------------------------
+  // When bind is 0.0.0.0 the panel is reachable from other devices, so the
+  // loopback-only Host check is replaced by a whitelist and a password gate
+  // is enforced. The loopback-only default keeps the original behaviour.
+  const exposed = bind === '0.0.0.0';
+  const hostAllow = new Set((allowedHosts || []).map(h => String(h).toLowerCase()));
+  function hostAllowed(hostHeader) {
+    if (!hostHeader) return false;
+    const host = hostHeader.toLowerCase();
+    if (!exposed) return host === `127.0.0.1:${server.address()?.port ?? port}`;
+    if (hostAllow.has(host)) return true;
+    const bare = host.replace(/:\d+$/, '');
+    if (['127.0.0.1', 'localhost', '[::1]'].includes(bare)) return true;
+    // RFC1918 / CGNAT / link-local v4 — private LAN ranges only, never public IPs.
+    return /^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})(:\d+)?$/.test(host);
+  }
+  const PASSWORD = exposed ? String(password) : '';
+  function passwordOk(req) {
+    if (!PASSWORD) return true;
+    const raw = req.headers.authorization || '';
+    if (!raw.startsWith('Basic ')) return false;
+    let decoded = '';
+    try { decoded = Buffer.from(raw.slice(6), 'base64').toString('utf8'); } catch { return false; }
+    const pass = decoded.slice(decoded.indexOf(':') + 1);
+    const a = Buffer.from(pass), b = Buffer.from(PASSWORD);
+    // timingSafeEqual throws on length mismatch — guard first, then compare.
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+  function cors(req, res) {
+    const origin = req.headers.origin;
+    if (!origin) return;
+    const u = new URL(origin);
+    if (hostAllowed(u.host)) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('access-control-allow-credentials', 'true');
+      res.setHeader('vary', 'Origin');
+    }
+  }
   async function body(req, max = 65536) { let size = 0; const chunks = []; for await (const chunk of req) { size += chunk.length; if (size > max) throw new Error('请求过大'); chunks.push(chunk); } return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
   function gatewayStatus() { return gateway && onebotPort ? { ...onebotPort.status(), type: 'onebot', selfId: gateway.selfId, url: gateway.url } : null; }
   const status = () => ({ ...bridge.status(), backend: 'standalone', model: 'local-fixture', modelPreview: preview.status(), roles, quietHours: cfg.quietHours, quiet: quiet.state(now()).state, conversation: chat.status(), gateway: gatewayStatus(), sendRate: sendRate ?? { maxSendPerMinute: 4, maxSendPerHour: 36 } });
@@ -79,7 +119,16 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   const receiveFixture = input => bridge.receiveSdk(makeSdkFixture(input, sdk, cfg.policy.selfId));
   const server = http.createServer(async (req, res) => {
     try {
-      if (req.headers.host !== new URL(origin).host) return json(res, 403, { error: 'Host 不匹配' });
+      cors(req, res);
+      if (req.method === 'OPTIONS' && exposed) {
+        res.writeHead(204, { 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-lab-token' });
+        return res.end();
+      }
+      if (!hostAllowed(req.headers.host)) return json(res, 403, { error: 'Host 不匹配' });
+      if (!passwordOk(req)) {
+        res.writeHead(401, { 'www-authenticate': 'Basic realm="QQRobot", charset="UTF-8"', 'content-type': 'text/plain; charset=utf-8' });
+        return res.end('需要登录口令');
+      }
       const url = new URL(req.url, origin);
       if (req.method !== 'GET' && switching) return json(res, 409, { error: '正在切换数据，请等待重启并刷新页面' });
       if (req.method === 'POST' && url.pathname === '/fixture/v1/chat/completions' && req.headers.authorization === `Bearer ${token}`) {
@@ -159,10 +208,13 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
       if (req.method === 'POST' && url.pathname === '/api/role') { const input = await body(req); bridge.setRole(input.scene, input.peerId, input.role); return json(res, 200, status()); }
       if (req.method === 'POST' && url.pathname === '/api/connect') return json(res, 409, { error: '匹配签名未验证，真实 QQ 连接入口关闭' });
       return json(res, 404, { error: '接口不存在' });
-    } catch { if (!res.headersSent) json(res, 400, { error: '请求无效或本机处理失败，请核对输入和配置' }); else res.end(); }
+    } catch (e) { if (process.env.QQROBOT_DEBUG) console.error('REQ_ERROR', e && e.stack || e); if (!res.headersSent) json(res, 400, { error: '请求无效或本机处理失败，请核对输入和配置' }); else res.end(); }
   });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
-  origin = `http://127.0.0.1:${server.address().port}`;
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, bind, resolve); });
+  const boundPort = server.address().port;
+  // origin is only used for same-origin URL parsing and the internal fixture
+  // baseUrl; keep it loopback so proxy/chat traffic never leaves the host.
+  origin = `http://127.0.0.1:${boundPort}`;
   chat = createConversation({ root: ROOT, dataDir, baseUrl: origin + '/fixture/v1', apiKey: token });
   let gatewayBridge = null;
   if (gateway) {
@@ -181,7 +233,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
     catch { // Port faults; the managed supervisor keeps the application alive.
     }
   }
-  return { origin, status, bridge, configurePolicy, configureQuiet, receiveFixture, modelRequests, gateway: gatewayStatus, gateways: () => gateway ? [gateway] : [],
+  return { origin, bind, exposed, passwordRequired: !!PASSWORD, status, bridge, configurePolicy, configureQuiet, receiveFixture, modelRequests, gateway: gatewayStatus, gateways: () => gateway ? [gateway] : [],
     async close() { await bridge.close(); if (gatewayBridge) { try { await gatewayBridge.close(); } catch {} } await chat.close(); await preview.close(); await new Promise(resolve => server.close(resolve)); }
   };
 }
