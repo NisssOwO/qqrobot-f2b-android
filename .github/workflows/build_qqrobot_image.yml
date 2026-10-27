@@ -65,14 +65,29 @@ jobs:
         run: |
           set -euxo pipefail
           test -f rootfs-builder/Dockerfile
+          # type=docker writes a classic docker-archive (manifest.json +
+          # repositories + layer directories). The runner's containerd image
+          # store makes plain `docker save` emit an OCI layout (blobs/sha256),
+          # which udocker on the phone cannot load. Exporting straight to a
+          # docker-archive keeps the artifact loadable by both udocker and
+          # plain docker.
           docker buildx build \
             --platform linux/arm64 \
             --build-arg GITHUB_PROXY="$GITHUB_PROXY" \
             --build-arg QQROBOT_VERSION="$QQROBOT_VERSION" \
-            --load \
+            --output type=docker,dest="$PWD/qqrobot-arm64.tar" \
             -t qqrobot:arm64 \
             -t "qqrobot:${QQROBOT_VERSION}" \
             ./rootfs-builder
+          ls -lh qqrobot-arm64.tar
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          tar -tf qqrobot-arm64.tar | grep -vq '^blobs/' || { echo 'artifact is OCI, not docker-archive'; exit 1; }
+
+      - name: Load the archive for the smoke test
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          docker load -i qqrobot-arm64.tar
           docker image inspect qqrobot:arm64 --format '{{.Architecture}} {{.Os}} {{.Size}}'
 
       - name: Smoke-test the image (panel only; QQ skipped under QEMU)
@@ -119,16 +134,13 @@ jobs:
             echo "LAN password guard did not trigger"; exit 1
           fi
 
-      - name: Export image with docker save
+      - name: Compress the docker-archive
         shell: bash {0}
         run: |
           set -euxo pipefail
-          # `docker save` keeps the full OCI manifest + layer digests, so
-          # udocker / podman / docker can all `load` the result. `docker
-          # export` would produce a flat filesystem instead.
-          docker save qqrobot:arm64 -o qqrobot-arm64.tar
+          # The tarball was already written by the build step (type=docker).
+          # udocker on the phone needs the docker-archive layout, not OCI.
           ls -lh qqrobot-arm64.tar
-          # Sanity: an OCI/docker-save archive contains a manifest.json.
           tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
           xz -6 -T0 qqrobot-arm64.tar
           ls -lh qqrobot-arm64.tar.xz

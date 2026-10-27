@@ -26,6 +26,13 @@ die()  { printf '\033[1;31m[qqrobot] 错误:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- 0. 环境检查 ------------------------------------------------------------
 [ -n "${PREFIX:-}" ] && [ -d "$PREFIX" ] || die "这不是 Termux 环境（PREFIX 未设置）。桌面环境请用 docker load。"
+
+# udocker 自带的 proot/curl 是给普通 Linux 的，在 Android 上不可用；不指定这三个
+# 变量时 udocker 会报 "installation of udockertools failed" 并拒绝执行任何命令。
+export UDOCKER_USE_PROOT_EXECUTABLE="${UDOCKER_USE_PROOT_EXECUTABLE:-$PREFIX/bin/proot}"
+export UDOCKER_USE_CURL_EXECUTABLE="${UDOCKER_USE_CURL_EXECUTABLE:-$PREFIX/bin/curl}"
+export UDOCKER_DIR="${UDOCKER_DIR:-$HOME/.udocker}"
+
 say "版本 $VERSION  数据目录 $DATA_DIR"
 
 case "$(uname -m)" in
