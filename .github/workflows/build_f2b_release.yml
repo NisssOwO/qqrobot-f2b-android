@@ -37,10 +37,12 @@ jobs:
       - name: Clone repository
         uses: actions/checkout@v6
 
-      - name: Point first-run rootfs URL at this repository's latest release
+      - name: Point first-run rootfs URL at this build's versioned release asset
         shell: bash {0}
         run: |
-          printf '%s' "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/rootfs-arm64.tar.xz" \
+          # Fixed-tag URL (not "latest"): this release is a prerelease, and
+          # /releases/latest/download/ only resolves for non-prerelease builds.
+          printf '%s' "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${{ env.F2B_VERSION }}/rootfs-arm64.tar.xz" \
             > app/src/main/assets/qqrobot-rootfs-url.txt
           echo "rootfs URL injected: $(cat app/src/main/assets/qqrobot-rootfs-url.txt)"
 
@@ -197,3 +199,5 @@ jobs:
           draft: false
           prerelease: true
           fail_on_unmatched_files: true
+          # Re-running the same version (e.g. after a fix) must overwrite assets.
+          overwrite: true
