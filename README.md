@@ -1,3 +1,24 @@
+# QQ机器人 F2B（termux-app fork）
+
+> 本仓库是 [termux/termux-app](https://github.com/termux/termux-app) 的定制 fork：
+> 把 [qq-robot-talking-FA](https://github.com/NisssOwO/qq-robot-talking-FA) 机器人打包成**安卓免 Root 即点即用 APK**。
+
+**与上游的差异**
+- **包名 / 应用名**：`dev.qqrobot.f2b` /「QQ聊天机器人」（含图标，占位可换）
+- **首启逻辑**：首次打开终端时运行 `QQRobotFirstRun`，自动
+  1. 从 `app/src/main/assets/qqrobot-rootfs-url.txt` 指向的 URL 下载 Ubuntu 24.04 arm64 容器（rootfs.tar.xz）；
+  2. 解压 rootfs、安装 Termux proot；
+  3. 幂等体检后启动容器内的 NapCat + 后端（面板 http://127.0.0.1:38121）；
+  4. 打开面板完成首次 QQ 扫码登录。
+- **rootfs 构建**：`rootfs-builder/Dockerfile`（ubuntu:24.04 + Node24 + NapCat + QQ + 后端，凭据不入包，webui token 首启随机生成）
+
+**构建（GitHub Actions）**：`.github/workflows/build_f2b_release.yml` — 手动触发（workflow_dispatch），产出
+`termux-app_<version>-f2b-debug_{universal,arm64-v8a}.apk + sha256sums` 与 `rootfs-arm64.tar.xz`，发布为 GitHub Release。
+
+**授权**：GPLv3-only（+ Apache-2.0 例外，同上游）。完整上游文档见下。
+
+---
+
 # Termux application
 
 [![Build status](https://github.com/termux/termux-app/workflows/Build/badge.svg)](https://github.com/termux/termux-app/actions)
