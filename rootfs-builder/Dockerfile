@@ -55,12 +55,16 @@ ENV QQROBOT_ARCH=arm64
 # 2) Node v24 (官方 arm64 tarball; noble 自带 nodejs 只有 18, 后端要求 >=22.13)
 # 用 dpkg --print-architecture 而不是 uname -m：前者读的是镜像内 dpkg 状态，
 # QEMU 下也稳定返回 arm64。
-RUN tmpdir=$(mktemp -d) && cd "$tmpdir" \
-    && curl -fsSL --retry 3 -o node.tar.xz \
-         "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-arm64.tar.xz" \
-    && tar -xJf node.tar.xz --strip-components=1 -C /usr/local \
-    && rm -rf "$tmpdir" \
-    && node --version && npm --version
+# cd / 之后才删临时目录：留在被删掉的 cwd 里执行 npm 会以
+# "uv_cwd ENOENT: process.cwd failed" 失败（npm 启动就要读 cwd）。
+RUN set -eu; \
+    tmpdir="$(mktemp -d)"; \
+    cd "$tmpdir"; \
+    curl -fsSL --retry 3 -o node.tar.xz \
+         "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-arm64.tar.xz"; \
+    tar -xJf node.tar.xz --strip-components=1 -C /usr/local; \
+    cd /; rm -rf "$tmpdir"; \
+    node --version; npm --version
 
 # 2b) /dev/shm 兜底
 # proot (udocker P 模式) 不提供 /dev/shm，而 Electron/Chromium 默认会去用它。
