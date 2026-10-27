@@ -11,6 +11,7 @@ import { normalizeOneBotMessage } from './src/gateway/onebot-message.mjs';
 import { OneBotTextPort } from './src/gateway/onebot-port.mjs';
 import { createConversation } from './src/conversation.mjs';
 import { createModelPreview } from './src/model-preview.mjs';
+import { execFileSync } from 'node:child_process';
 import { serviceCommand } from './service.mjs';
 import { createBackup, listBackups, readBackup, stageRestore, MAX_BACKUP_BYTES } from './src/data-backup.mjs';
 import { selectData, listRestores } from './src/data-selection.mjs';
@@ -30,6 +31,24 @@ function gatewayConfig(raw, selfId) {
 export const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const roles = JSON.parse(fs.readFileSync(path.join(ROOT, 'resources/roles.json'), 'utf8'));
 const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+// The QQ process and its NapCat payload only exist inside the container image.
+// Both are resolved at request time from the environment so the same build runs
+// on a device (where the paths exist) and under the acceptance harness (where
+// they do not — the login panel then simply reports "no QR code yet").
+const QQ_BIN_PATH = process.env.QQ_BIN || '/root/Napcat/opt/QQ/qq';
+const NAPCAT_QR_PATH = process.env.NAPCAT_QR_PATH || path.join(path.dirname(QQ_BIN_PATH), 'resources/app/app_launcher/napcat/cache/qrcode.png');
+function qqProcessAlive() {
+  try { return execFileSync('pgrep', ['-f', QQ_BIN_PATH], { encoding: 'utf8', timeout: 2000 }).trim() !== ''; }
+  catch { return false; }
+}
+function loginState() {
+  let qr = null;
+  try {
+    const stat = fs.statSync(NAPCAT_QR_PATH);
+    qr = { ageSec: Math.max(0, Math.round((Date.now() - stat.mtimeMs) / 1000)), bytes: stat.size, generatedAt: stat.mtime.toISOString() };
+  } catch { qr = null; }
+  return { qqAlive: qqProcessAlive(), qr };
+}
 function validQuiet(raw) {
   if (typeof raw?.enabled !== 'boolean') throw new Error('静默配置无效');
   const weekdays = raw.workday?.weekdays;
@@ -150,6 +169,23 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         return res.end(fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8').replace('__TOKEN__', token));
       }
       if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status());
+      // Login panel: the QR code lives in NapCat's cache, the refresh action asks
+      // the start script's watchdog to relaunch QQ by killing it (the watchdog
+      // owns the relaunch, so there is exactly one place that starts QQ).
+      if (req.method === 'GET' && url.pathname === '/api/login/state') return json(res, 200, { ...loginState(), gateway: gatewayStatus() });
+      if (req.method === 'GET' && url.pathname === '/api/login/qrcode.png') {
+        try {
+          const png = fs.readFileSync(NAPCAT_QR_PATH);
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+          return res.end(png);
+        } catch { return json(res, 404, { error: '还没有二维码，请先启动 QQ' }); }
+      }
+      if (req.method === 'POST' && url.pathname === '/api/login/refresh') {
+        if (!qqProcessAlive()) return json(res, 409, { error: 'QQ 没有在运行，无法刷新二维码' });
+        try { execFileSync('pkill', ['-f', QQ_BIN_PATH], { timeout: 5000 }); }
+        catch { return json(res, 500, { error: '结束 QQ 进程失败' }); }
+        return json(res, 202, { accepted: true, note: 'QQ 正在重启，约 30-60 秒后生成新二维码；期间请勿关闭容器' });
+      }
       if (req.method === 'GET' && url.pathname === '/api/backups') return json(res, 200, { backups: listBackups(dataDir) });
       if (url.pathname.startsWith('/api/restore') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '恢复操作需要当前管理页面凭据' });
       if (req.method === 'GET' && url.pathname === '/api/restores') {
