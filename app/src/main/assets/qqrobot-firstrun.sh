@@ -116,7 +116,7 @@ if [ ! -x "$PREFIX/bin/proot" ]; then
   done < <(candidates "$PROOT_URL")
   [ "$OK" = 1 ] || fail "proot 所有下载源都不可达: $PROOT_URL"
   mkdir -p "$PREFIX"
-  tar -xJf "$PROOT_TAR" -C "$PREFIX" || fail "proot 解压失败"
+  xz -dkc "$PROOT_TAR" | tar -x -C "$PREFIX" || fail "proot 解压失败"
   rm -f "$PROOT_TAR"
 fi
 command -v proot >/dev/null 2>&1 || fail "proot 不可用"
