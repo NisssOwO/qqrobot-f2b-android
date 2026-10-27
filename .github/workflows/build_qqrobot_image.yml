@@ -109,6 +109,9 @@ jobs:
         run: |
           set -euxo pipefail
           docker load -i qqrobot-arm64.tar
+          # skopeo keeps only the tag asked for on its command line, so restore
+          # the short alias the smoke test and the artifact use.
+          docker tag "qqrobot:${QQROBOT_VERSION}" qqrobot:arm64
           docker image inspect qqrobot:arm64 --format '{{.Architecture}} {{.Os}} {{.Size}}'
 
       - name: Smoke-test the image (panel only; QQ skipped under QEMU)
