@@ -1,0 +1,22 @@
+{
+  "name": "qqrobot-termux-text-port",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --require ./network-guard.cjs server.mjs",
+    "test": "node --require ./network-guard.cjs acceptance.mjs",
+    "test:network": "node network-policy-acceptance.cjs",
+    "test:service": "node service-acceptance.mjs",
+    "test:onebot": "node --require ./network-guard.cjs onebot-acceptance.mjs",
+    "test:restore-switch": "node restore-switch-acceptance.mjs"
+  },
+  "dependencies": {
+    "@acidify/core": "1.6.3",
+    "ws": "8.18.3",
+    "fflate": "0.8.2"
+  }
+}

@@ -1,0 +1,187 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import * as sdk from '@acidify/core';
+import { QuietHours, parseHm } from './src/quiet-hours.mjs';
+import { TextBridge, atomicJson, validatePolicy } from './src/gateway/text-bridge.mjs';
+import { makeSdkFixture } from './src/gateway/acidify-message.mjs';
+import { normalizeOneBotMessage } from './src/gateway/onebot-message.mjs';
+import { OneBotTextPort } from './src/gateway/onebot-port.mjs';
+import { createConversation } from './src/conversation.mjs';
+import { createModelPreview } from './src/model-preview.mjs';
+import { serviceCommand } from './service.mjs';
+import { createBackup, listBackups, readBackup, stageRestore, MAX_BACKUP_BYTES } from './src/data-backup.mjs';
+import { selectData, listRestores } from './src/data-selection.mjs';
+
+// Explicit local OneBot gateway contract. The gateway is enabled only when the
+// config carries an authenticated local account, never through remote control.
+function gatewayConfig(raw, selfId) {
+  const value = raw?.gateway;
+  if (value == null || value.enabled === false || value.type == null) return null;
+  if (value.enabled !== true || value.type !== 'onebot') throw new Error('网关仅支持本机 OneBot');
+  if (typeof value.url !== 'string' || typeof value.token !== 'string' || !/^[\x21-\x7e]{8,512}$/.test(value.token)) throw new Error('OneBot 网关需配置本地地址与访问令牌');
+  const endpoint = new URL(value.url);
+  if (endpoint.protocol !== 'ws:' || !['127.0.0.1', '[::1]'].includes(endpoint.hostname) || !endpoint.port || endpoint.pathname !== '/' || endpoint.search || endpoint.hash) throw new Error('OneBot 网关仅接受本机正向 WebSocket');
+  return Object.freeze({ type: 'onebot', enabled: true, url: endpoint.href, token: value.token, selfId: String(selfId) });
+}
+
+export const ROOT = path.dirname(fileURLToPath(import.meta.url));
+export const roles = JSON.parse(fs.readFileSync(path.join(ROOT, 'resources/roles.json'), 'utf8'));
+const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+function validQuiet(raw) {
+  if (typeof raw?.enabled !== 'boolean') throw new Error('静默配置无效');
+  const weekdays = raw.workday?.weekdays;
+  if (!Array.isArray(weekdays) || !weekdays.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) throw new Error('工作日无效');
+  for (const section of ['workday', 'offday']) {
+    const windows = raw[section]?.windows;
+    if (!Array.isArray(windows) || windows.length > 12 || windows.some(w => !Array.isArray(w) || w.length !== 2 || parseHm(w[0]) === null || parseHm(w[1]) === null || parseHm(w[0]) >= parseHm(w[1]))) throw new Error('静默窗口无效；暂不支持跨午夜或24:00');
+  }
+  return { enabled: raw.enabled, holidays: 'none', workday: { weekdays, windows: raw.workday.windows }, offday: { windows: raw.offday.windows } };
+}
+// 连发速率配置（对齐 Windows 版 send.maxSendPerMinute=4 / maxSendPerHour=36）。
+// 仅透传正整数字段，缺省由 TextBridge 使用默认值。
+function validSendRate(raw) {
+  if (raw == null) return null;
+  const maxSendPerMinute = raw.maxSendPerMinute;
+  const maxSendPerHour = raw.maxSendPerHour;
+  if (![maxSendPerMinute, maxSendPerHour].every(v => v === undefined || (Number.isInteger(v) && v > 0))) throw new Error('连发速率配置无效');
+  const next = {};
+  if (Number.isInteger(maxSendPerMinute)) next.maxSendPerMinute = maxSendPerMinute;
+  if (Number.isInteger(maxSendPerHour)) next.maxSendPerHour = maxSendPerHour;
+  return Object.keys(next).length ? Object.freeze(next) : null;
+}
+export async function createApplication({ dataDir = path.join(ROOT, 'data'), serviceDataDir, port = 0, now = Date.now, fixtureModel, previewChatFactory } = {}) {
+  dataDir = path.resolve(dataDir); fs.mkdirSync(dataDir, { recursive: true });
+  serviceDataDir = path.resolve(serviceDataDir ?? dataDir);
+  const configFile = path.join(dataDir, 'config.json');
+  const cfg = JSON.parse(fs.readFileSync(fs.existsSync(configFile) ? configFile : path.join(ROOT, 'config.example.json'), 'utf8'));
+  if (cfg.backend !== 'standalone' || cfg.mode !== 'simulation') throw new Error('真实网关尚未开放；仅支持 standalone + simulation');
+  cfg.policy = validatePolicy(cfg.policy, roles.map(r => r.id)); cfg.quietHours = validQuiet(cfg.quietHours); const sendRate = cfg.sendRate ? validSendRate(cfg.sendRate) : null; if (sendRate) cfg.sendRate = sendRate; atomicJson(configFile, cfg);
+  const gateway = gatewayConfig(cfg, cfg.policy.selfId);
+  if (gateway) atomicJson(configFile, { ...cfg, gateway });
+  const quiet = new QuietHours({ config: cfg.quietHours, stateDir: dataDir });
+  const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory });
+  const token = randomBytes(32).toString('hex');
+  let origin, chat, bridge, onebotPort = null, receiptCounter = 0, switching = false;
+  const modelRequests = [];
+  function json(res, status, data) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
+  async function body(req, max = 65536) { let size = 0; const chunks = []; for await (const chunk of req) { size += chunk.length; if (size > max) throw new Error('请求过大'); chunks.push(chunk); } return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
+  function gatewayStatus() { return gateway && onebotPort ? { ...onebotPort.status(), type: 'onebot', selfId: gateway.selfId, url: gateway.url } : null; }
+  const status = () => ({ ...bridge.status(), backend: 'standalone', model: 'local-fixture', modelPreview: preview.status(), roles, quietHours: cfg.quietHours, quiet: quiet.state(now()).state, conversation: chat.status(), gateway: gatewayStatus(), sendRate: sendRate ?? { maxSendPerMinute: 4, maxSendPerHour: 36 } });
+  const configurePolicy = raw => {
+    const next = validatePolicy(raw, roles.map(r => r.id));
+    if (next.selfId !== cfg.policy.selfId) throw new Error('更换身份需停止后修改配置并重启');
+    atomicJson(configFile, { ...cfg, policy: next }); cfg.policy = next; bridge.updatePolicy(next); return status();
+  };
+  const configureQuiet = raw => { const next = validQuiet(raw); atomicJson(configFile, { ...cfg, quietHours: next }); cfg.quietHours = next; quiet.configure(next); return status(); };
+  const receiveFixture = input => bridge.receiveSdk(makeSdkFixture(input, sdk, cfg.policy.selfId));
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (req.headers.host !== new URL(origin).host) return json(res, 403, { error: 'Host 不匹配' });
+      const url = new URL(req.url, origin);
+      if (req.method !== 'GET' && switching) return json(res, 409, { error: '正在切换数据，请等待重启并刷新页面' });
+      if (req.method === 'POST' && url.pathname === '/fixture/v1/chat/completions' && req.headers.authorization === `Bearer ${token}`) {
+        const input = await body(req, 2097152); modelRequests.push(input); if (modelRequests.length > 12) modelRequests.shift();
+        if (fixtureModel) return json(res, 200, await fixtureModel(input));
+        const system = input.messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
+        const role = roles.find(r => system.includes(fs.readFileSync(path.join(ROOT, 'resources/prompts', r.id + '.md'), 'utf8').trim()))?.name || '未识别角色';
+        const users = input.messages.filter(m => m.role === 'user');
+        return json(res, 200, { choices: [{ message: { role: 'assistant', content: `【模拟·${role}】第${users.length}轮：${users.at(-1).content}；首条：${users[0].content}` } }] });
+      }
+      if (req.method !== 'GET' && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '页面凭据失效，请刷新' });
+      if (url.pathname.startsWith('/api/backup') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '备份操作需要当前管理页面凭据' });
+      if (req.method === 'GET' && url.pathname === '/') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'", 'x-frame-options': 'DENY' });
+        return res.end(fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8').replace('__TOKEN__', token));
+      }
+      if (req.method === 'GET' && url.pathname === '/api/status') return json(res, 200, status());
+      if (req.method === 'GET' && url.pathname === '/api/backups') return json(res, 200, { backups: listBackups(dataDir) });
+      if (url.pathname.startsWith('/api/restore') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '恢复操作需要当前管理页面凭据' });
+      if (req.method === 'GET' && url.pathname === '/api/restores') {
+        let managed = false, activeId = 'original';
+        try { const service = await serviceCommand('status', serviceDataDir); managed = service.childPid === process.pid; if (managed) activeId = service.activeDataId; } catch {}
+        return json(res, 200, { managed, activeId, copies: listRestores(serviceDataDir) });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/restore/activate') {
+        if (bridge.closed || bridge.queued || preview.status().busy) return json(res, 409, { error: '请等待消息或试聊完成后再切换数据' });
+        let service;
+        try { service = await serviceCommand('status', serviceDataDir); } catch {}
+        if (service?.childPid !== process.pid) return json(res, 409, { error: '需要先通过运行管理器启动，才能切换数据' });
+        const input = await body(req);
+        // Recheck after the asynchronous body read so no in-flight turn is lost.
+        if (bridge.closed || bridge.queued || preview.status().busy) return json(res, 409, { error: '当前有消息或试聊正在处理' });
+        const selected = selectData(serviceDataDir, input.id, { roleIds: roles.map(role => role.id) });
+        switching = true;
+        try { await serviceCommand('restart', serviceDataDir); }
+        catch { return json(res, 503, { error: '重启结果尚未确认，请刷新页面检查；不要重复提交切换' }); }
+        return json(res, 200, { accepted: true, selectedId: selected.selectedId, previousPid: process.pid, credentialsCopied: false });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/backup/download') {
+        const id = url.searchParams.get('id'); const backup = readBackup(dataDir, id);
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-disposition': `attachment; filename="qqrobot-backup-${id}.json"` }); return res.end(backup);
+      }
+      if (req.method === 'POST' && ['/api/backup/create', '/api/backup/restore'].includes(url.pathname)) {
+        const input = await body(req, url.pathname.endsWith('/restore') ? MAX_BACKUP_BYTES : 65536);
+        if (bridge.closed || bridge.queued || preview.status().busy) return json(res, 409, { error: '请等待当前消息处理结束后再备份或恢复' });
+        const options = { roleIds: roles.map(role => role.id), appVersion };
+        return json(res, 200, url.pathname.endsWith('/create') ? createBackup(dataDir, options) : stageRestore(serviceDataDir, input, options));
+      }
+      if (req.method === 'GET' && url.pathname === '/api/runtime') {
+        let service = null; try { service = await serviceCommand('status', serviceDataDir); } catch {}
+        return json(res, 200, { pid: process.pid, uptimeSeconds: Math.floor(process.uptime()), modelRequestAttempts: globalThis[Symbol.for('qqrobot.termux.c.guard')]?.explicitModelFetches ?? null, managed: service?.childPid === process.pid,
+          phase: service?.childPid === process.pid ? service.phase : 'direct', launches: service?.childPid === process.pid ? service.launches : null, activeDataId: service?.childPid === process.pid ? service.activeDataId : 'original' });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/gateway') {
+        const state = gatewayStatus();
+        if (!state) return json(res, 200, { enabled: false });
+        return json(res, 200, { enabled: true, type: 'onebot', state: state.state, pending: state.pending, counters: state.counters });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/gateway/connect') {
+        if (!gateway || !onebotPort) return json(res, 409, { error: '网关未配置' });
+        if (bridge.closed || switching) return json(res, 409, { error: '当前状态不允许连接网关' });
+        try { await onebotPort.connect({ enabled: true }); return json(res, 200, { accepted: true, ...gatewayStatus() }); }
+        catch (error) { return json(res, 502, { error: 'OneBot 网关连接或身份验证失败' }); }
+      }
+      if (req.method === 'POST' && url.pathname === '/api/gateway/disconnect') {
+        if (!gateway || !onebotPort || !['ready', 'connecting', 'checking', 'faulted'].includes(onebotPort.status().state)) return json(res, 409, { error: '网关未连接' });
+        await onebotPort.close(); onebotPort = null;
+        return json(res, 200, { accepted: true });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/fixture') return json(res, 200, await receiveFixture(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/model/config') return json(res, 200, await preview.configure(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/model/clear') return json(res, 200, await preview.clear());
+      if (req.method === 'POST' && url.pathname === '/api/model/chat') return json(res, 200, await preview.reply(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/model/once') return json(res, 200, await preview.testOnce(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/policy') return json(res, 200, configurePolicy(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/quiet') return json(res, 200, configureQuiet(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/role') { const input = await body(req); bridge.setRole(input.scene, input.peerId, input.role); return json(res, 200, status()); }
+      if (req.method === 'POST' && url.pathname === '/api/connect') return json(res, 409, { error: '匹配签名未验证，真实 QQ 连接入口关闭' });
+      return json(res, 404, { error: '接口不存在' });
+    } catch { if (!res.headersSent) json(res, 400, { error: '请求无效或本机处理失败，请核对输入和配置' }); else res.end(); }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  origin = `http://127.0.0.1:${server.address().port}`;
+  chat = createConversation({ root: ROOT, dataDir, baseUrl: origin + '/fixture/v1', apiKey: token });
+  let gatewayBridge = null;
+  if (gateway) {
+    // Explicit, single-use local OneBot gateway. No automatic reconnects: a
+    // transport failure faults the port and the managed service restarts it.
+    gatewayBridge = new OneBotTextPort({ url: gateway.url, token: gateway.token, selfId: gateway.selfId, receive: () => {}, timeoutMs: 5000 });
+    gatewayBridge.receive = event => bridge.receiveSdk(event);
+    onebotPort = gatewayBridge;
+  }
+  bridge = new TextBridge({ sdk, dataDir, policy: cfg.policy, roleIds: roles.map(r => r.id), quiet, now, knownSecrets: [token], sendRate: sendRate ?? {}, gatewayBacked: !!gateway,
+    normalizeMessage: gateway ? normalizeOneBotMessage : undefined,
+    respond: event => chat.reply(event),
+    sendText: gateway ? req => gatewayBridge.sendText(req) : async () => `mock-${++receiptCounter}` });
+  if (gateway) {
+    try { await gatewayBridge.connect({ enabled: true }); }
+    catch { // Port faults; the managed supervisor keeps the application alive.
+    }
+  }
+  return { origin, status, bridge, configurePolicy, configureQuiet, receiveFixture, modelRequests, gateway: gatewayStatus, gateways: () => gateway ? [gateway] : [],
+    async close() { await bridge.close(); if (gatewayBridge) { try { await gatewayBridge.close(); } catch {} } await chat.close(); await preview.close(); await new Promise(resolve => server.close(resolve)); }
+  };
+}

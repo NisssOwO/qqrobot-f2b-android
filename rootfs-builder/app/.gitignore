@@ -1,0 +1,9 @@
+node_modules/
+data/
+acceptance-data-*/
+npm-cache/
+report.json
+run.log
+run.exit
+
+service-test-*/
