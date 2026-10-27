@@ -149,11 +149,46 @@ jobs:
           docker export "$CID" | xz -6 -T0 > rootfs-arm64.tar.xz
           ls -lh rootfs-arm64.tar.xz
 
-      - name: Upload rootfs artifact
+      - name: Build proot runtime asset (termux deb repackaged, no apt)
+        # proot 安装绕开 apt(apt 二进制编译期硬编码 com.termux 路径, 改名包上
+        # 无法读取配置)。改走资产直下: 从 termux 官方源取 proot 及其依赖
+        # libtalloc/libandroid-shmem 三个 deb, 解包重组为 proot-arm64.tar.xz,
+        # tar 内路径以 usr/ 为根(解压到 $PREFIX 即得 bin/proot + libexec/proot/* + lib/*.so)。
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          BASE="https://packages.termux.dev/apt/termux-main/pool/main"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          # 固定版本(与真机 bootstrap 2026.02.12-r1 同代): proot 5.1.107.101
+          # deps 均无更多依赖(libtalloc→libc, libandroid-shmem→libc; libc 在 bootstrap 内)
+          for f in \
+            "$BASE/p/proot/proot_5.1.107.101_aarch64.deb" \
+            "$BASE/libt/libtalloc/libtalloc_2.5.0_aarch64.deb" \
+            "$BASE/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb"; do
+            curl -fL --retry 5 --retry-delay 3 -O "$f"
+          done
+          ls -la *.deb
+          ROOT="$WORK/tree"
+          for d in *.deb; do dpkg-deb -x "$d" "$ROOT"; done
+          find "$ROOT" -type f -o -type l | sed "s|$ROOT||" | sort | head -20
+          # deb 内路径为 data/data/com.termux/files/usr/... → 组装时只取 usr/ 内容
+          SRCDIR="$ROOT/data/data/com.termux/files/usr"
+          test -x "$SRCDIR/bin/proot" && test -x "$SRCDIR/libexec/proot/loader"
+          (cd "$SRCDIR" && tar -cJf "$GITHUB_WORKSPACE/proot-arm64.tar.xz" \
+             bin/proot bin/termux-chroot \
+             libexec/proot/loader libexec/proot/loader32 \
+             lib/libtalloc.so lib/libtalloc.so.2 lib/libtalloc.so.2.5.0 \
+             lib/libandroid-shmem.so)
+          ls -lh "$GITHUB_WORKSPACE/proot-arm64.tar.xz"
+
+      - name: Upload rootfs + proot artifacts
         uses: actions/upload-artifact@v6
         with:
           name: f2b-rootfs
-          path: rootfs-arm64.tar.xz
+          path: |
+            rootfs-arm64.tar.xz
+            proot-arm64.tar.xz
           if-no-files-found: error
 
   publish-release:
@@ -184,6 +219,7 @@ jobs:
             ### 包含
             - APK（universal / arm64-v8a，debug 签名，安装即用）
             - rootfs-arm64.tar.xz（Ubuntu 24.04 arm64 容器，APK 首次启动自动下载）
+            - proot-arm64.tar.xz（Termux proot 运行时，首次启动自动下载并解压，不经 apt）
 
             ### 安装
             1. 安装 termux-app_v${{ env.F2B_VERSION }}-f2b-debug_universal.apk
@@ -196,6 +232,7 @@ jobs:
             dist/apks/termux-app_*-f2b-debug_universal.apk
             dist/apks/termux-app_*-f2b-debug_sha256sums
             dist/rootfs/rootfs-arm64.tar.xz
+            dist/rootfs/proot-arm64.tar.xz
           draft: false
           prerelease: true
           fail_on_unmatched_files: true

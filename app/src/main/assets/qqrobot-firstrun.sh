@@ -65,29 +65,33 @@ df -h "$FILES" | tail -n 1
 # ---- 3) 下载 rootfs（多镜像 fallback + 断点续传 + 重试）----
 # github 直连在国内网络常被墙(TCP 卡死), 依次尝试镜像前缀, 先用 RANGE 探活再全量拉
 # 提示: 公司/家庭 WiFi 可达性不同; 某镜像挂了会自动跳过
-dl() {  # dl <label> <url>: 探活+全量下载, 成功返回 0
-  local label="$1" url="$2"
+dl() {  # dl <label> <url> <out>: 探活+全量下载到 out, 成功返回 0; 失败清理 .part
+  local label="$1" url="$2" out="$3" part="$3.part"
   say "尝试镜像: $label ($url)"
   if curl -fL -s --connect-timeout 8 --max-time 15 -r 0-1023 -o /dev/null "$url"; then
     say "镜像可达, 开始下载…"
     if curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 15 \
-         -o "$ROOTFS_TAR.part" "$url"; then
-      mv "$ROOTFS_TAR.part" "$ROOTFS_TAR"
+         -o "$part" "$url"; then
+      mv "$part" "$out"
       return 0
     fi
   fi
-  rm -f "$ROOTFS_TAR.part"
+  rm -f "$part"
   return 1
+}
+candidates() {  # candidates <base-url...>: 输出 原址+三个国内镜像前缀, 每行一个
+  local base="$1"
+  printf '%s\n' "$base" \
+              "https://gh-proxy.com/$base" \
+              "https://ghproxy.net/$base" \
+              "https://ghfast.top/$base"
 }
 if [ ! -f "$ROOTFS_DIR/etc/os-release" ] && [ ! -s "$ROOTFS_TAR" ]; then
   say "下载 rootfs（体积较大，请保持网络与前台运行）…"
   OK=0
-  for cand in "$ROOTFS_URL" \
-              "https://gh-proxy.com/$ROOTFS_URL" \
-              "https://ghproxy.net/$ROOTFS_URL" \
-              "https://ghfast.top/$ROOTFS_URL"; do
-    if dl "候选 $cand" "$cand"; then OK=1; break; fi
-  done
+  while IFS= read -r cand; do
+    if dl "候选 $cand" "$cand" "$ROOTFS_TAR"; then OK=1; break; fi
+  done < <(candidates "$ROOTFS_URL")
   [ "$OK" = 1 ] || fail "所有下载源都不可达，请检查网络重试: $ROOTFS_URL"
 fi
 
@@ -99,13 +103,21 @@ if [ ! -f "$ROOTFS_DIR/etc/os-release" ]; then
   xz -dkc "$ROOTFS_TAR" | tar -x -C "$ROOTFS_DIR" || fail "解压失败"
 fi
 
-# ---- 5) 安装 proot（Termux 官方源, CA 已导出）----
-if ! command -v proot >/dev/null 2>&1; then
-  say "安装 proot …"
-  apt-get update -qq && apt-get install -y proot || {
-    # 备选: pkg 是同名封装, 部分版本无 apt-get 直装
-    command -v pkg >/dev/null 2>&1 && pkg install -y proot || fail "proot 安装失败"
-  }
+# ---- 5) 安装 proot（Termux 官方 deb 重组资产, 不经 apt; apt 二进制编译期
+#      硬编码 com.termux 路径, 改名包上无法读取配置, 只能资产直下）----
+PROOT_TAR=$FILES/proot.tar.xz
+# proot 资产与 rootfs 同 release: <rootfs-url 的目录>/proot-arm64.tar.xz
+PROOT_URL="${ROOTFS_URL%/rootfs-arm64.tar.xz}/proot-arm64.tar.xz"
+if [ ! -x "$PREFIX/bin/proot" ]; then
+  say "下载 proot 运行时（$PROOT_URL）…"
+  OK=0
+  while IFS= read -r cand; do
+    if dl "候选 $cand" "$cand" "$PROOT_TAR"; then OK=1; break; fi
+  done < <(candidates "$PROOT_URL")
+  [ "$OK" = 1 ] || fail "proot 所有下载源都不可达: $PROOT_URL"
+  mkdir -p "$PREFIX"
+  tar -xJf "$PROOT_TAR" -C "$PREFIX" || fail "proot 解压失败"
+  rm -f "$PROOT_TAR"
 fi
 command -v proot >/dev/null 2>&1 || fail "proot 不可用"
 
