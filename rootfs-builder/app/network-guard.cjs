@@ -19,6 +19,12 @@ state.setModelEndpoint = baseUrl => {
   modelEndpoint = new URL(url.href.replace(/\/$/, '') + '/chat/completions');
 };
 const modelHost = host => modelEndpoint && String(host).toLowerCase() === modelEndpoint.hostname;
+// Inbound LAN binding is an explicit product opt-in (the admin panel). It is
+// never implied: the caller must set QQROBOT_ALLOW_LAN_LISTEN=1, which only the
+// panel process does when QQROBOT_BIND=0.0.0.0. Outbound traffic stays
+// restricted to loopback by the wrappers below.
+const lanListen = () => process.env.QQROBOT_ALLOW_LAN_LISTEN === '1';
+const wildcardLiteral = host => ['0.0.0.0', '::', '::0'].includes(String(host));
 function deny(kind, target) {
   state.blocked.push({ kind, target: String(target) });
   const error = new Error(`C_NETWORK_GUARD: ${kind} ${target}`);
@@ -47,7 +53,12 @@ const listen = net.Server.prototype.listen;
 net.Server.prototype.listen = function (...args) {
   const first = args[0];
   const host = typeof first === 'object' ? first.host : args[1];
-  if (!loopback(host)) return deny('listen', host ?? 'unspecified');
+  // Inbound LAN binding is an explicit product opt-in (the admin panel). It is
+  // never implied: the caller must set QQROBOT_ALLOW_LAN_LISTEN=1, which only
+  // the panel process does when QQROBOT_BIND=0.0.0.0. Outbound traffic is still
+  // restricted to loopback by the wrappers above.
+  const lanBind = lanListen() && wildcardLiteral(host);
+  if (!loopback(host) && !lanBind) return deny('listen', host ?? 'unspecified');
   return Reflect.apply(listen, this, args);
 };
 const originalFetch = globalThis.fetch.bind(globalThis);
@@ -63,12 +74,14 @@ globalThis.fetch = function (input, init) {
 for (const method of ['lookup', 'resolve', 'resolve4', 'resolve6', 'resolveAny']) {
   const original = dns[method];
   dns[method] = function (host, ...args) {
-    if (!loopback(host) && !modelHost(host)) return deny(`dns.${method}`, host);
+    // net.Server.listen() resolves a wildcard bind address through dns.lookup;
+    // that is not an outbound query, so allow it only with the LAN opt-in.
+    if (!loopback(host) && !modelHost(host) && !(lanListen() && wildcardLiteral(host))) return deny(`dns.${method}`, host);
     return Reflect.apply(original, this, [host, ...args]);
   };
   const promiseOriginal = dns.promises[method];
   if (promiseOriginal) dns.promises[method] = function (host, ...args) {
-    if (!loopback(host) && !modelHost(host)) return Promise.reject(new Error('C_NETWORK_GUARD: DNS disabled'));
+    if (!loopback(host) && !modelHost(host) && !(lanListen() && wildcardLiteral(host))) return Promise.reject(new Error('C_NETWORK_GUARD: DNS disabled'));
     return Reflect.apply(promiseOriginal, this, [host, ...args]);
   };
 }

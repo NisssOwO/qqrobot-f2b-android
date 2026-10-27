@@ -125,7 +125,11 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         return res.end();
       }
       if (!hostAllowed(req.headers.host)) return json(res, 403, { error: 'Host 不匹配' });
-      if (!passwordOk(req)) {
+      // The internal fixture endpoint is machine-to-machine (the console model call),
+      // guarded by the per-process Bearer token below, so it must not require the
+      // human login password. Every other route still needs it.
+      const internalFixture = req.url.startsWith('/fixture/');
+      if (!internalFixture && !passwordOk(req)) {
         res.writeHead(401, { 'www-authenticate': 'Basic realm="QQRobot", charset="UTF-8"', 'content-type': 'text/plain; charset=utf-8' });
         return res.end('需要登录口令');
       }

@@ -13,6 +13,11 @@ if (!['127.0.0.1', '0.0.0.0'].includes(bind)) throw new Error('QQROBOT_BIND must
 const password = process.env.QQROBOT_PASSWORD || process.env.PANEL_PASSWORD || '';
 if (bind === '0.0.0.0' && !password) throw new Error('QQROBOT_BIND=0.0.0.0 requires QQROBOT_PASSWORD');
 
+// The network guard blocks non-loopback *listening* by default. Exposing the
+// admin panel on the LAN is a deliberate opt-in, so unlock exactly that case
+// (outbound connections/DNS/UDP stay blocked while the guard is loaded).
+if (bind === '0.0.0.0') process.env.QQROBOT_ALLOW_LAN_LISTEN = '1';
+
 const app = await createApplication({
   port,
   bind,

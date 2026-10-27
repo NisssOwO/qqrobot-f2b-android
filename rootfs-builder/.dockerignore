@@ -4,4 +4,6 @@
 **/run.log
 **/*.log
 **/lan-log*.txt
+**/*-acceptance.*
+**/report.json
 .git
