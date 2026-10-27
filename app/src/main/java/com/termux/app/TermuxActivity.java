@@ -399,6 +399,14 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 TermuxInstaller.setupBootstrapIfNeeded(TermuxActivity.this, () -> {
                     if (mTermuxService == null) return; // Activity might have been destroyed.
                     try {
+                        // QQRobot (dev.qqrobot.f2b): on first launch, run the first-run
+                        // provisioning session (download rootfs, install proot, start
+                        // container, open panel) instead of a plain login shell.
+                        if (QQRobotFirstRun.startFirstRunIfNeeded(TermuxActivity.this,
+                                mTermuxService, mTermuxTerminalSessionActivityClient)) {
+                            return; // First-run session started; nothing else to add.
+                        }
+
                         boolean launchFailsafe = false;
                         if (intent != null && intent.getExtras() != null) {
                             launchFailsafe = intent.getExtras().getBoolean(TERMUX_ACTIVITY.EXTRA_FAILSAFE_SESSION, false);

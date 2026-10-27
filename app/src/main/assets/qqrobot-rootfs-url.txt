@@ -1,0 +1,1 @@
+https://github.com/NisssOwO/qq-robot-talking-FA/releases/latest/download/rootfs-arm64.tar.xz
