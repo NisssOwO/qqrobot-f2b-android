@@ -11,7 +11,6 @@ import { normalizeOneBotMessage } from './src/gateway/onebot-message.mjs';
 import { OneBotTextPort } from './src/gateway/onebot-port.mjs';
 import { createConversation } from './src/conversation.mjs';
 import { createModelPreview } from './src/model-preview.mjs';
-import { execFileSync } from 'node:child_process';
 import { serviceCommand } from './service.mjs';
 import { createBackup, listBackups, readBackup, stageRestore, MAX_BACKUP_BYTES } from './src/data-backup.mjs';
 import { selectData, listRestores } from './src/data-selection.mjs';
@@ -37,9 +36,21 @@ const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), '
 // they do not — the login panel then simply reports "no QR code yet").
 const QQ_BIN_PATH = process.env.QQ_BIN || '/root/Napcat/opt/QQ/qq';
 const NAPCAT_QR_PATH = process.env.NAPCAT_QR_PATH || path.join(path.dirname(QQ_BIN_PATH), 'resources/app/app_launcher/napcat/cache/qrcode.png');
-function qqProcessAlive() {
-  try { return execFileSync('pgrep', ['-f', QQ_BIN_PATH], { encoding: 'utf8', timeout: 2000 }).trim() !== ''; }
-  catch { return false; }
+// pgrep is unreliable inside a proot container (it needs /proc metadata the
+// emulation does not expose), so question /proc directly — under udocker the
+// container's /proc is the host's, which is exactly what we want to know.
+function qqPids() {
+  const pids = [];
+  let entries;
+  try { entries = fs.readdirSync('/proc'); } catch { return pids; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+      if (cmdline.split(' ')[0] === QQ_BIN_PATH) pids.push(Number(entry));
+    } catch { /* process vanished or is not ours */ }
+  }
+  return pids;
 }
 function loginState() {
   let qr = null;
@@ -47,7 +58,7 @@ function loginState() {
     const stat = fs.statSync(NAPCAT_QR_PATH);
     qr = { ageSec: Math.max(0, Math.round((Date.now() - stat.mtimeMs) / 1000)), bytes: stat.size, generatedAt: stat.mtime.toISOString() };
   } catch { qr = null; }
-  return { qqAlive: qqProcessAlive(), qr };
+  return { qqAlive: qqPids().length > 0, qr };
 }
 function validQuiet(raw) {
   if (typeof raw?.enabled !== 'boolean') throw new Error('静默配置无效');
@@ -181,10 +192,14 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         } catch { return json(res, 404, { error: '还没有二维码，请先启动 QQ' }); }
       }
       if (req.method === 'POST' && url.pathname === '/api/login/refresh') {
-        if (!qqProcessAlive()) return json(res, 409, { error: 'QQ 没有在运行，无法刷新二维码' });
-        try { execFileSync('pkill', ['-f', QQ_BIN_PATH], { timeout: 5000 }); }
-        catch { return json(res, 500, { error: '结束 QQ 进程失败' }); }
-        return json(res, 202, { accepted: true, note: 'QQ 正在重启，约 30-60 秒后生成新二维码；期间请勿关闭容器' });
+        const pids = qqPids();
+        if (pids.length === 0) return json(res, 409, { error: 'QQ 没有在运行，无法刷新二维码' });
+        // SIGTERM, not SIGKILL: QQ has to flush its own state, and the start
+        // script's watchdog is what relaunches it (single owner of that job).
+        let signalled = 0;
+        for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); signalled += 1; } catch { /* already gone */ } }
+        if (signalled === 0) return json(res, 500, { error: '结束 QQ 进程失败' });
+        return json(res, 202, { accepted: true, killed: signalled, note: 'QQ 正在重启，约 30-60 秒后生成新二维码；期间请勿关闭容器' });
       }
       if (req.method === 'GET' && url.pathname === '/api/backups') return json(res, 200, { backups: listBackups(dataDir) });
       if (url.pathname.startsWith('/api/restore') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '恢复操作需要当前管理页面凭据' });
