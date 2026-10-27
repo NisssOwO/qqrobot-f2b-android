@@ -32,7 +32,7 @@ RUN tmpdir=$(mktemp -d) && cd "$tmpdir" \
     && ARCH=$([ "$PLAT" = "aarch64" ] && echo arm64 || echo "$PLAT") \
     && curl -fsSL -o node.tar.xz "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${ARCH}.tar.xz" \
     && tar -xJf node.tar.xz --strip-components=1 -C /usr/local \
-    && rm -rf "$tmpdir" \
+    && cd / && rm -rf "$tmpdir" \
     && node --version && npm --version
 
 # 3) NapCat + QQ 3.2.34-53644 (官方 shell 安装, 与真机一致; 无 QQ 登录态)
