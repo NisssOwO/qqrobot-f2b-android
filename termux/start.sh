@@ -63,11 +63,11 @@ run_args=(
 [ -n "$PASSWORD" ] && run_args+=("--env=QQROBOT_PASSWORD=${PASSWORD}")
 
 # 清理上一次同名容器（udocker run --name 重复使用会报名称冲突）
-if udocker ps 2>/dev/null | grep -q "qqrobot"; then
+# 注意: `udocker rm <name>` 报 "Error: invalid container id"，只能按 ID 删
+existing_ids=$(udocker ps 2>/dev/null | awk '/qqrobot/{print $1}')
+if [ -n "$existing_ids" ]; then
   say "清理旧容器…"
-  udocker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  # --name 生成的容器在 udocker ps 里显示为 ['name']，按名字删不掉时按 ID 删
-  for cid in $(udocker ps 2>/dev/null | awk '/qqrobot/{print $1}'); do
+  for cid in $existing_ids; do
     udocker rm -f "$cid" >/dev/null 2>&1 || true
   done
 fi
