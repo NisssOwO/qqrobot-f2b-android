@@ -83,6 +83,27 @@ jobs:
           tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
           tar -tf qqrobot-arm64.tar | grep -vq '^blobs/' || { echo 'artifact is OCI, not docker-archive'; exit 1; }
 
+      - name: Repack as a legacy docker-archive (udocker reads layer dirs)
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          # udocker's DockerLocalFileAPI expects the old `docker save` layout:
+          # manifest.json + repositories + <layer-id>/{VERSION,json,layer.tar}.
+          # buildx's type=docker keeps OCI-style `blobs/sha256/...` files, which
+          # udocker extracts but then cannot map back to layers. skopeo rewrites
+          # the same image into the legacy layout.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          skopeo copy docker-archive:qqrobot-arm64.tar "docker-archive:qqrobot-legacy.tar:qqrobot:${QQROBOT_VERSION}"
+          mv qqrobot-legacy.tar qqrobot-arm64.tar
+          ls -lh qqrobot-arm64.tar
+          if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
+            echo 'still an OCI layout; udocker would fail to load it'
+            exit 1
+          fi
+          tar -tf qqrobot-arm64.tar | grep -q 'layer.tar'
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+
       - name: Load the archive for the smoke test
         shell: bash {0}
         run: |
