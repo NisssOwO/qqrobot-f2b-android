@@ -47,7 +47,7 @@ jobs:
           echo "rootfs URL injected: $(cat app/src/main/assets/qqrobot-rootfs-url.txt)"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '17'
