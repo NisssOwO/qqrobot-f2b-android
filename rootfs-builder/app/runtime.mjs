@@ -93,7 +93,17 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   if (gateway) atomicJson(configFile, { ...cfg, gateway });
   const quiet = new QuietHours({ config: cfg.quietHours, stateDir: dataDir });
   const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory, onChange: cfg => applyReplyModel(cfg) });
-  const token = randomBytes(32).toString('hex');
+  // The page token only guards same-origin form posts. Keep it on disk so that a
+  // backend restart (for example when the gateway reconnects) does not invalidate
+  // every panel already open in a browser.
+  const tokenFile = path.join(dataDir, '.runtime', 'panel-token');
+  let token = '';
+  try { token = fs.readFileSync(tokenFile, 'utf8').trim(); } catch {}
+  if (!/^[0-9a-f]{64}$/.test(token)) {
+    token = randomBytes(32).toString('hex');
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+    fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+  }
   let origin, chat, bridge, onebotPort = null, receiptCounter = 0, switching = false;
   const modelRequests = [];
   function json(res, status, data) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
