@@ -52,23 +52,35 @@ try {
 
   const raw = JSON.parse(fs.readFileSync(path.join(work, 'manifest.json'), 'utf8'));
   const entry = Array.isArray(raw) ? raw[0] : raw;
-  const configFile = entry.Config;
+  const rawConfig = entry.Config ?? '';
   const layers = entry.Layers ?? [];
-  if (!configFile || !fs.existsSync(path.join(work, configFile))) {
-    throw new Error(`config ${configFile} missing from the archive`);
+  // Same OCI-path ambiguity as the layers: try the literal path, its basename
+  // and the basename plus .json before concluding the config is absent.
+  const configFile = [rawConfig, path.basename(rawConfig), `${path.basename(rawConfig)}.json`]
+    .find(name => name && fs.existsSync(path.join(work, name)));
+  if (!configFile) {
+    throw new Error(`config ${rawConfig} missing from the archive`);
   }
   if (!layers.length) throw new Error('the archive lists no layers');
 
   const ids = [];
   let parent = '';
-  layers.forEach((layer, index) => {
+  const present = new Set(fs.readdirSync(work));
+  console.log(`archive holds ${present.size} top-level entries`);
+  layers.forEach((layer) => {
     // buildx with the containerd store writes manifest Layers as OCI-ish
     // "blobs/sha256/<digest>" paths while the tar itself holds flat
     // "<digest>.tar" files, so resolve by basename before giving up.
     const candidates = [layer, path.basename(layer), `${path.basename(layer)}.tar`];
     const source = candidates.map(name => path.join(work, name)).find(p => fs.existsSync(p));
-    if (!source) throw new Error(`layer ${layer} missing from the archive`);
-    const id = createHash('sha256').update(`${parent}:${layer}:${index}`).digest('hex');
+    if (!source) {
+      // manifest Layers can list OCI empty layers that carry no filesystem
+      // content and are never written as tars. Dropping one keeps the parent
+      // chain contiguous, so udocker still walks it correctly.
+      console.log(`skip layer with no payload: ${layer}`);
+      return;
+    }
+    const id = createHash('sha256').update(`${parent}:${layer}:${ids.length}`).digest('hex');
     const dir = path.join(work, id);
     fs.mkdirSync(dir, { recursive: true });
     // load_json() parses VERSION, so it has to be valid JSON.
@@ -78,6 +90,7 @@ try {
     ids.push(id);
     parent = id;
   });
+  if (!ids.length) throw new Error('none of the listed layers carried any payload');
 
   fs.writeFileSync(path.join(work, 'manifest.json'), JSON.stringify([{
     Config: configFile,
