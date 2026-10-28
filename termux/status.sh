@@ -1,7 +1,7 @@
 #!/bin/bash
 # QQ聊天机器人 · Termux 状态查看
 set -u
-VERSION="${QQROBOT_VERSION:-0.2.7}"
+VERSION="${QQROBOT_VERSION:-0.2.8}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"
 PORT="${QQROBOT_PORT:-38121}"
 export UDOCKER_USE_PROOT_EXECUTABLE="${PREFIX:-}/bin/proot"

@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.7' }}
+  QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.8' }}
 
 jobs:
   build-image:

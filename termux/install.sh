@@ -14,7 +14,7 @@
 # 数据目录: $HOME/qqrobot-data （config、QQ 登录态、NapCat 配置都在这）
 set -eu
 
-VERSION="${QQROBOT_VERSION:-0.2.7}"
+VERSION="${QQROBOT_VERSION:-0.2.8}"
 REPO="${QQROBOT_REPO:-NisssOwO/qqrobot-f2b-android}"
 PROXY="${QQROBOT_PROXY:-https://gh-proxy.com/}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"
@@ -98,15 +98,27 @@ IMG_TAR="$DOWNLOAD_DIR/qqrobot-arm64.tar"
 if udocker images 2>/dev/null | grep -q "qqrobot:${VERSION}"; then
   say "镜像 qqrobot:${VERSION} 已存在，跳过下载"
 else
-  say "下载镜像（约 400–600MB，视网络可能需要几分钟）…"
   BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
   ok=0
-  for prefix in "$PROXY" ""; do
-    url="${prefix}${BASE}/qqrobot-arm64.tar.xz"
-    say "  尝试 $url"
-    if curl -fL --retry 2 --retry-delay 3 -C - -o "$IMG_XZ" "$url"; then ok=1; break; fi
-    rm -f "$IMG_XZ"
-  done
+  # 预置镜像优先：用 adb push 或 U 盘拷进来的文件，没网也能装。有校验文件就必须匹配。
+  if [ -s "$IMG_XZ" ]; then
+    if [ ! -f "$IMG_XZ.sha256" ] || ( cd "$DOWNLOAD_DIR" && sha256sum -c "$(basename "$IMG_XZ").sha256" >/dev/null 2>&1 ); then
+      say "使用已下载的镜像，跳过下载"
+      ok=1
+    else
+      warn "本地镜像校验不通过，重新下载"
+      rm -f "$IMG_XZ"
+    fi
+  fi
+  if [ "$ok" != 1 ]; then
+    say "下载镜像（约 400–600MB，视网络可能需要几分钟）…"
+    for prefix in "$PROXY" ""; do
+      url="${prefix}${BASE}/qqrobot-arm64.tar.xz"
+      say "  尝试 $url"
+      if curl -fL --retry 2 --retry-delay 3 -C - -o "$IMG_XZ" "$url"; then ok=1; break; fi
+      rm -f "$IMG_XZ"
+    done
+  fi
   [ "$ok" = 1 ] || die "下载镜像失败。可换镜像: QQROBOT_PROXY=https://ghproxy.net/ bash install.sh"
 
   # 校验
