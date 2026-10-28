@@ -171,12 +171,23 @@ else
   # localrepo 的 v1 分支要求 repository 目录里每个 <id>.layer 都在，
   # 这里把它们指向刚补好的真实文件。
   IMG_REPO="$(ls -dt "$HOME/.udocker/repos"/*/qqrobot/"$VERSION" 2>/dev/null | head -1)"
-  if [ -n "$IMG_REPO" ] && [ -f "$IMG_REPO/ancestry" ]; then
-    for id in $(tr -d '[]",' < "$IMG_REPO/ancestry" | tr ' ' '\n' | grep -v '^$'); do
-      if [ -f "$HOME/.udocker/layers/$id.layer" ]; then
-        ln -sf "$HOME/.udocker/layers/$id.layer" "$IMG_REPO/$id.layer"
-      fi
-    done
+  if [ -n "$IMG_REPO" ]; then
+    if [ -f "$IMG_REPO/ancestry" ]; then
+      for id in $(tr -d '[]",' < "$IMG_REPO/ancestry" | tr ' ' '\n' | grep -v '^$'); do
+        if [ -f "$HOME/.udocker/layers/$id.layer" ]; then
+          ln -sf "$HOME/.udocker/layers/$id.layer" "$IMG_REPO/$id.layer"
+        fi
+      done
+    else
+      # v1 布局没有 ancestry：repo 目录里每个 <id>.json 代表一层，按文件名补链接。
+      for j in "$IMG_REPO"/*.json; do
+        [ -f "$j" ] || continue
+        id="$(basename "$j" .json)"
+        if [ -f "$HOME/.udocker/layers/$id.layer" ]; then
+          ln -sf "$HOME/.udocker/layers/$id.layer" "$IMG_REPO/$id.layer"
+        fi
+      done
+    fi
   fi
 fi
 
