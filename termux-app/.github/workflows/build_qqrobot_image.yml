@@ -1,0 +1,281 @@
+name: Build QQRobot container image
+
+# Builds the QQ聊天机器人 OCI image (linux/arm64) and publishes it as a
+# release asset that can be imported WITHOUT a working Docker daemon:
+#
+#   udocker load --name=qqrobot < qqrobot-arm64.tar        (Termux / Android)
+#   docker load  < qqrobot-arm64.tar                       (desktop)
+#   podman load  < qqrobot-arm64.tar
+#
+# The image is exported with `docker save` (full OCI layout, not `docker
+# export`) so every container tool can import it. It is deliberately NOT
+# pushed to a registry: GHCR is unreachable from mainland China, and the
+# release asset can be fetched through a GitHub proxy mirror.
+#
+# Trigger: workflow_dispatch (manual, optional version input) or push of v* tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for this build (e.g. 0.2.0). Default: 0.2.0'
+        required: false
+        default: '0.2.0'
+      publish:
+        description: 'Publish a GitHub Release (false = only upload an artifact, for build verification)'
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qqrobot-image
+  cancel-in-progress: false
+
+env:
+  QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.0' }}
+
+jobs:
+  build-image:
+    name: Build linux/arm64 image and export
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build arm64 image
+        shell: bash {0}
+        env:
+          # GitHub runners reach github.com directly; installing through a
+          # proxy here would only add a failure point. The user side uses a
+          # proxy when downloading the release asset.
+          GITHUB_PROXY: 0
+        run: |
+          set -euxo pipefail
+          test -f rootfs-builder/Dockerfile
+          # type=docker writes a classic docker-archive (manifest.json +
+          # repositories + layer directories). The runner's containerd image
+          # store makes plain `docker save` emit an OCI layout (blobs/sha256),
+          # which udocker on the phone cannot load. Exporting straight to a
+          # docker-archive keeps the artifact loadable by both udocker and
+          # plain docker.
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg GITHUB_PROXY="$GITHUB_PROXY" \
+            --build-arg QQROBOT_VERSION="$QQROBOT_VERSION" \
+            --output type=docker,dest="$PWD/qqrobot-arm64.tar" \
+            -t qqrobot:arm64 \
+            -t "qqrobot:${QQROBOT_VERSION}" \
+            ./rootfs-builder
+          ls -lh qqrobot-arm64.tar
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          tar -tf qqrobot-arm64.tar | grep -vq '^blobs/' || { echo 'artifact is OCI, not docker-archive'; exit 1; }
+
+      - name: Repack into a classic docker-archive
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          # udocker 1.3.17's DockerLocalFileAPI walks the old `docker save`
+          # layout: manifest.json + repositories + <layer-id>/{VERSION,json,layer.tar}.
+          # buildx --output type=docker writes OCI blobs, skopeo's rewrite drops
+          # most .layer files, and podman writes flat <layer-id>.tar files instead
+          # of per-layer directories - all three leave `udocker create` dead with
+          # "getting layers or json". The docker daemon's own save is the only
+          # producer that writes the layout udocker actually reads.
+          docker load -i qqrobot-arm64.tar
+          docker image ls --format '{{.Repository}}:{{.Tag}}'
+          loaded="$(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F ":${QQROBOT_VERSION}" | head -1 || true)"
+          [ -n "$loaded" ] || { echo 'the archive did not load any tagged image'; exit 1; }
+          docker tag "$loaded" "qqrobot:${QQROBOT_VERSION}"
+          docker save -o qqrobot-arm64.tar "qqrobot:${QQROBOT_VERSION}"
+          ls -lh qqrobot-arm64.tar
+          if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
+            echo 'still an OCI layout; udocker would fail to load it'
+            exit 1
+          fi
+          tar -tf qqrobot-arm64.tar | grep -q 'layer.tar'
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          tar -tf qqrobot-arm64.tar | grep -q '^repositories$'
+
+      - name: Load the archive for the smoke test
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          docker load -i qqrobot-arm64.tar
+          docker image ls --format '{{.Repository}}:{{.Tag}}'
+          # podman records the repository as localhost/qqrobot, so the tag after
+          # a load is not necessarily qqrobot:<version>. Take whatever carries
+          # our version and give the smoke test the alias it looks for.
+          loaded="$(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F ":${QQROBOT_VERSION}" | head -1 || true)"
+          [ -n "$loaded" ] || { echo 'the archive did not load any tagged image'; exit 1; }
+          echo "loaded image: $loaded"
+          docker tag "$loaded" qqrobot:arm64
+          docker image inspect qqrobot:arm64 --format '{{.Architecture}} {{.Os}} {{.Size}}'
+
+      - name: Smoke-test the image (panel only; QQ skipped under QEMU)
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          # Running the Electron QQ under QEMU takes ages and proves nothing the
+          # real device has not already proven, so the container is started with
+          # QQROBOT_SKIP_QQ=1 — it boots the panel and nothing else.
+          # BIND must be 0.0.0.0 here: a loopback-only listener is unreachable
+          # through docker's port publishing (DNAT hits the container IP).
+          docker run -d --name qqr-smoke \
+            -e QQROBOT_SKIP_QQ=1 \
+            -e QQROBOT_BIND=0.0.0.0 \
+            -e QQROBOT_PASSWORD=smoke-test-123 \
+            -p 38121:38121 qqrobot:arm64
+          trap 'docker logs qqr-smoke || true; docker rm -f qqr-smoke || true' EXIT
+
+          code=000
+          for i in $(seq 1 36); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+                     -u ':smoke-test-123' http://127.0.0.1:38121/api/status || echo 000)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "panel http=$code"
+          test "$code" = "200" || { docker logs qqr-smoke; exit 1; }
+
+          noauth=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:38121/api/status || echo 000)
+          test "$noauth" = "401" || { echo "expected 401 without password, got $noauth"; exit 1; }
+
+          curl -s -u ':smoke-test-123' http://127.0.0.1:38121/api/status | head -c 200; echo
+          docker rm -f qqr-smoke
+          trap - EXIT
+
+          # LAN guard: binding to 0.0.0.0 without a password must fail fast.
+          # `|| true`: the container exits non-zero by design, and under
+          # `set -o pipefail` that alone would make the pipeline look failed.
+          guard_out="$(docker run --rm -e QQROBOT_SKIP_QQ=1 -e QQROBOT_BIND=0.0.0.0 qqrobot:arm64 2>&1 || true)"
+          printf '%s\n' "$guard_out"
+          if printf '%s' "$guard_out" | grep -q QQROBOT_PASSWORD; then
+            echo "LAN password guard OK"
+          else
+            echo "LAN password guard did not trigger"; exit 1
+          fi
+
+      - name: Compress the docker-archive
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          # The tarball was already written by the build step (type=docker).
+          # udocker on the phone needs the docker-archive layout, not OCI.
+          ls -lh qqrobot-arm64.tar
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          xz -6 -T0 qqrobot-arm64.tar
+          ls -lh qqrobot-arm64.tar.xz
+
+      - name: Compute checksums
+        shell: bash {0}
+        run: |
+          set -euxo pipefail
+          sha256sum qqrobot-arm64.tar.xz > qqrobot-arm64.tar.xz.sha256
+          cat qqrobot-arm64.tar.xz.sha256
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: qqrobot-image
+          path: |
+            qqrobot-arm64.tar.xz
+            qqrobot-arm64.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: [build-image]
+    # Verification builds (publish=false) stop after the artifact is uploaded,
+    # so a broken image never becomes a published release. Job-level `if` cannot
+    # read the env context (GitHub rejects the workflow), hence the inline test.
+    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: qqrobot-image
+          path: dist/
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.QQROBOT_VERSION }}
+          name: QQ聊天机器人 容器版 v${{ env.QQROBOT_VERSION }}
+          body: |
+            ## QQ聊天机器人 · 容器版 v${{ env.QQROBOT_VERSION }}
+
+            linux/arm64 OCI 镜像，`docker save` 导出。**不需要 root，不需要 docker daemon**
+            也能跑（Termux 用 `udocker load`）。
+
+            ### 下载
+            - `qqrobot-arm64.tar.xz` — 镜像本体（约 400–600MB）
+            - `qqrobot-arm64.tar.xz.sha256` — 校验值
+
+            国内加速：在下载链接前加 `https://gh-proxy.com/` 前缀。
+
+            ### Termux（免 root）
+            ```bash
+            pkg install -y proot python tar xz-utils
+            pip install --no-cache-dir udocker
+            curl -fL -o udt.tar.gz https://gh-proxy.com/https://raw.githubusercontent.com/jorge-lip/udocker-builds/master/tarballs/udocker-englib-1.2.11.tar.gz
+            UDOCKER_TARBALL=$PWD/udt.tar.gz udocker install
+
+            curl -fL -o qqrobot.tar.xz https://gh-proxy.com/https://github.com/${{ github.repository }}/releases/download/v${{ env.QQROBOT_VERSION }}/qqrobot-arm64.tar.xz
+            xz -dk qqrobot.tar.xz
+            udocker load -i qqrobot.tar
+            udocker create --name=qqrobot qqrobot:${QQROBOT_VERSION}
+            udocker run --name=qqrobot -p 38121:38121 \
+              -v $HOME/qqrobot-data:/data \
+              -e QQROBOT_BIND=0.0.0.0 \
+              -e QQROBOT_PASSWORD='换成你自己的口令' \
+              -e QQ_ACCOUNT=你的QQ号 \
+              qqrobot:${QQROBOT_VERSION}
+            ```
+
+            ### 桌面 docker / podman
+            ```bash
+            docker load < qqrobot.tar
+            docker run -d --name qqrobot -p 38121:38121 \
+              -v qqrobot-data:/data \
+              -e QQROBOT_BIND=0.0.0.0 \
+              -e QQROBOT_PASSWORD='换成你自己的口令' \
+              qqrobot:${QQROBOT_VERSION}
+            ```
+
+            ### 环境变量
+            | 变量 | 默认 | 说明 |
+            |---|---|---|
+            | `QQROBOT_BIND` | `127.0.0.1` | 仅本机；设 `0.0.0.0` 才对局域网开放 |
+            | `QQROBOT_PORT` | `38121` | 面板端口 |
+            | `QQROBOT_PASSWORD` | 空 | 局域网登录口令；`BIND=0.0.0.0` 时**必填**，否则拒绝启动 |
+            | `QQ_ACCOUNT` | — | 机器人 QQ 号 |
+            | `GROUP_ALLOW` | — | 允许的群号，逗号分隔 |
+            | `QQROBOT_DATA_DIR` | `/data` | 持久化目录（挂载卷） |
+
+            ### 首次启动
+            1. 面板地址 `http://<手机IP>:38121`，浏览器会弹登录框，用口令进入
+            2. QQ 登录二维码在面板首页显示，手机 QQ 扫码
+            3. 登录态保存在 `/data`，容器重建不丢
+
+            > 凭据不入镜像：NapCat WebUI token 首次启动随机生成，写在 `/data/napcat-config/webui.json`。
+          files: |
+            dist/qqrobot-arm64.tar.xz
+            dist/qqrobot-arm64.tar.xz.sha256
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
