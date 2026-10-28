@@ -125,6 +125,47 @@ else
   xz -dkf "$IMG_XZ"
   say "导入 udocker…"
   udocker load -i "$IMG_TAR" || die "udocker load 失败"
+
+  # udocker 1.3.17 的 load 只写悬空软链接 layers/<id>.layer -> ../<sha>.tar，
+  # 那个 tar 从不落盘，于是 create 永远报 "getting layers or json"。
+  # 镜像包里真实层数据是顶层 <sha>.tar，这里按 <id>/layer.tar 的链接补成真文件。
+  say "修复镜像层（udocker 1.3.17 的已知缺陷）…"
+  LAYER_TMP="$TMPDIR/qqrobot-layers"
+  rm -rf "$LAYER_TMP"
+  mkdir -p "$LAYER_TMP"
+  tar -xf "$IMG_TAR" -C "$LAYER_TMP" || die "解压镜像层失败"
+  layer_count=0
+  for d in "$LAYER_TMP"/*/; do
+    [ -d "$d" ] || continue
+    hex="${d%/}"
+    hex="${hex##*/}"
+    [ -e "$d/layer.tar" ] || continue
+    tgt="$(readlink "$d/layer.tar" 2>/dev/null || true)"
+    if [ -n "$tgt" ]; then
+      src="$LAYER_TMP/${tgt#../}"
+    else
+      src="$d/layer.tar"
+    fi
+    [ -f "$src" ] || src="$LAYER_TMP/${tgt##*/}"
+    if [ -f "$src" ]; then
+      rm -f "$HOME/.udocker/layers/$hex.layer"
+      cp "$src" "$HOME/.udocker/layers/$hex.layer" && layer_count=$((layer_count + 1))
+    fi
+  done
+  rm -rf "$LAYER_TMP"
+  say "  补回 $layer_count 个层文件"
+  [ "$layer_count" -gt 0 ] || die "没能从镜像包里取出层文件，打包方式可能变了"
+
+  # localrepo 的 v1 分支要求 repository 目录里每个 <id>.layer 都在，
+  # 这里把它们指向刚补好的真实文件。
+  IMG_REPO="$(ls -dt "$HOME/.udocker/repos"/*/qqrobot/"$VERSION" 2>/dev/null | head -1)"
+  if [ -n "$IMG_REPO" ] && [ -f "$IMG_REPO/ancestry" ]; then
+    for id in $(tr -d '[]",' < "$IMG_REPO/ancestry" | tr ' ' '\n' | grep -v '^$'); do
+      if [ -f "$HOME/.udocker/layers/$id.layer" ]; then
+        ln -sf "$HOME/.udocker/layers/$id.layer" "$IMG_REPO/$id.layer"
+      fi
+    done
+  fi
 fi
 
 # --- 5. 建容器（不启动） -----------------------------------------------------
