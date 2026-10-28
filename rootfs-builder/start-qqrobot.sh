@@ -67,11 +67,22 @@ fi
 log "xvfb pid=$XVFB_PID"
 
 # --- 辅助函数 ---------------------------------------------------------------
+# PIDs get recycled, and QQ dies often enough that `kill -0 $QQ_PID` eventually
+# points at some unrelated process and the watchdog silently stops restarting
+# it. Verify the PID still *is* QQ by reading its command line.
+qq_alive() {
+  [ -n "$QQ_PID" ] || return 1
+  tr '\0' ' ' < "/proc/$QQ_PID/cmdline" 2>/dev/null | grep -qF "$QQ_BIN"
+}
+
 start_qq() {
   pkill -f "$QQ_BIN" 2>/dev/null
   sleep 2
   cd /root || return 1
-  "$QQ_BIN" --no-sandbox --disable-dev-shm-usage --disable-gpu --ozone-platform=x11 -q "$QQ_ACCOUNT" \
+  # Chromium's crash reporter is what usually raises SIGTRAP inside a proot
+  # container; nothing can read the minidumps here anyway, so turn it off.
+  "$QQ_BIN" --no-sandbox --disable-dev-shm-usage --disable-gpu --ozone-platform=x11 \
+      --disable-crash-reporter --disable-breakpad -q "$QQ_ACCOUNT" \
       >> /tmp/qq.log 2>&1 &
   QQ_PID=$!
   log "qq pid=$QQ_PID account=$QQ_ACCOUNT"
@@ -82,7 +93,7 @@ wait_onebot() {
   local deadline=$(( $(date +%s) + ${1:-240} ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if timeout 2 bash -c '</dev/tcp/127.0.0.1/3001' 2>/dev/null; then return 0; fi
-    if ! kill -0 "$QQ_PID" 2>/dev/null; then return 2; fi
+    if ! qq_alive; then return 2; fi
     sleep 5
   done
   return 1
@@ -153,7 +164,7 @@ while true; do
   fi
 
   # QQ 崩溃/被杀: 重启后 OneBot 端口会重建，旧后端连接已断，必须一并重启后端
-  if ! kill -0 "$QQ_PID" 2>/dev/null; then
+  if ! qq_alive; then
     log "QQ 退出，重启"
     start_qq
     if wait_onebot 240; then
