@@ -81,7 +81,12 @@ jobs:
             ./rootfs-builder
           ls -lh qqrobot-arm64.tar
           tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
-          tar -tf qqrobot-arm64.tar | grep -vq '^blobs/' || { echo 'artifact is OCI, not docker-archive'; exit 1; }
+          # With the containerd store buildx can emit a hybrid archive: a
+          # docker-archive manifest.json whose Layers point into blobs/sha256/.
+          # mk-v1-archive.mjs resolves both shapes, so only note it here.
+          if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
+            echo 'note: hybrid docker-archive with OCI blobs; the repack handles it'
+          fi
 
       - name: Repack into a classic v2s1 docker-archive
         shell: bash {0}

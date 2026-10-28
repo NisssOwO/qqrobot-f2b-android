@@ -56,11 +56,17 @@ try {
   const layers = entry.Layers ?? [];
   // Same OCI-path ambiguity as the layers: try the literal path, its basename
   // and the basename plus .json before concluding the config is absent.
-  const configFile = [rawConfig, path.basename(rawConfig), `${path.basename(rawConfig)}.json`]
+  const found = [rawConfig, path.basename(rawConfig), `${path.basename(rawConfig)}.json`]
     .find(name => name && fs.existsSync(path.join(work, name)));
-  if (!configFile) {
+  if (!found) {
     throw new Error(`config ${rawConfig} missing from the archive`);
   }
+  // When the archive is a hybrid (docker-archive shell around OCI blobs) the
+  // config sits under blobs/sha256/. Move it to the root: the cleanup below
+  // deletes any top-level directory it does not recognise, which would take
+  // blobs/ - and the config inside it - with it.
+  const configFile = path.basename(found);
+  if (found !== configFile) fs.renameSync(path.join(work, found), path.join(work, configFile));
   if (!layers.length) throw new Error('the archive lists no layers');
 
   const ids = [];
