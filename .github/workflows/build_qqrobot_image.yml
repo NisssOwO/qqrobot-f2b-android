@@ -92,11 +92,13 @@ jobs:
           # buildx writes OCI blobs, skopeo's default v2s2 drops most .layer files,
           # podman writes flat <layer-id>.tar files, and even the docker daemon's
           # own save now emits flat layer tars - all leave `udocker create` dead
-          # with "getting layers or json". skopeo --format v1 is the one producer
-          # that still writes per-layer directories with a parent chain.
+          # with "getting layers or json". skopeo's v2s1 output is the one
+          # producer left that still writes per-layer directories with a parent
+          # chain ("v1" is not a valid name on current skopeo: it only accepts
+          # oci / v2s1 / v2s2 and dies with unknown format before doing anything).
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
-          skopeo copy --format v1 \
+          skopeo copy --format v2s1 \
             oci-archive:qqrobot-arm64.tar \
             "docker-archive:qqrobot-v1.tar:qqrobot:${QQROBOT_VERSION}"
           mv qqrobot-v1.tar qqrobot-arm64.tar
