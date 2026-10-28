@@ -62,8 +62,12 @@ try {
   const ids = [];
   let parent = '';
   layers.forEach((layer, index) => {
-    const source = path.join(work, layer);
-    if (!fs.existsSync(source)) throw new Error(`layer ${layer} missing from the archive`);
+    // buildx with the containerd store writes manifest Layers as OCI-ish
+    // "blobs/sha256/<digest>" paths while the tar itself holds flat
+    // "<digest>.tar" files, so resolve by basename before giving up.
+    const candidates = [layer, path.basename(layer), `${path.basename(layer)}.tar`];
+    const source = candidates.map(name => path.join(work, name)).find(p => fs.existsSync(p));
+    if (!source) throw new Error(`layer ${layer} missing from the archive`);
     const id = createHash('sha256').update(`${parent}:${layer}:${index}`).digest('hex');
     const dir = path.join(work, id);
     fs.mkdirSync(dir, { recursive: true });
