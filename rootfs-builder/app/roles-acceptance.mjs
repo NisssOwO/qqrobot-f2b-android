@@ -140,6 +140,43 @@ try {
 
   const erased = await post('/api/roles/delete', { id: '../escape' });
   check('a traversal id is refused on delete', erased.status === 400, `status=${erased.status}`);
+
+  // ---- role pack ----
+  const noPackBody = JSON.parse((await get('/api/roles/content?id=hazuki')).body);
+  check('a card without a pack reports empty metadata', Array.isArray(noPackBody.pack.aliases) && noPackBody.pack.aliases.length === 0 && noPackBody.pack.worldName === '', JSON.stringify(noPackBody.pack));
+
+  const savedPack = await post('/api/roles/pack', { id: 'hazuki', aliases: ['七草はづき', ' はづき ', 'はづき', ''], worldName: '283プロダクション' });
+  const savedPackBody = JSON.parse(savedPack.body);
+  check('saving a pack succeeds', savedPack.status === 200, `status=${savedPack.status}`);
+  check('aliases are trimmed and deduplicated', JSON.stringify(savedPackBody.pack.aliases) === JSON.stringify(['七草はづき', 'はづき']), JSON.stringify(savedPackBody.pack.aliases));
+  check('the world name is kept', savedPackBody.pack.worldName === '283プロダクション', savedPackBody.pack.worldName);
+  check('the pack file lands next to the card', fs.existsSync(path.join(prompts, 'hazuki.pack.json')), 'missing hazuki.pack.json');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(prompts, 'hazuki.pack.json'), 'utf8'));
+  check('the pack keeps the role and card name', onDisk.role === '七草はづき' && onDisk.roleFile === 'hazuki.md', JSON.stringify({ role: onDisk.role, roleFile: onDisk.roleFile }));
+  check('the empty tts fields are preserved', onDisk.voiceId === '' && typeof onDisk.dictionary === 'object', JSON.stringify({ voiceId: onDisk.voiceId, dictionary: onDisk.dictionary }));
+
+  const rereadBody = JSON.parse((await get('/api/roles/content?id=hazuki')).body);
+  check('a fresh read returns the saved pack', rereadBody.pack.worldName === '283プロダクション' && rereadBody.pack.aliases.length === 2, JSON.stringify(rereadBody.pack));
+
+  const asText = await post('/api/roles/pack', { id: 'hazuki', aliases: 'あさひ, 朝日、あさひ', worldName: '' });
+  const asTextBody = JSON.parse(asText.body);
+  check('a comma separated string is accepted', JSON.stringify(asTextBody.pack.aliases) === JSON.stringify(['あさひ', '朝日']), JSON.stringify(asTextBody.pack.aliases));
+
+  const tooLong = await post('/api/roles/pack', { id: 'hazuki', aliases: ['x'.repeat(41)], worldName: '' });
+  check('an over-long alias is refused', tooLong.status === 400, `status=${tooLong.status}`);
+  const tooMany = await post('/api/roles/pack', { id: 'hazuki', aliases: Array.from({ length: 33 }, (_, i) => `a${i}`), worldName: '' });
+  check('too many aliases are refused', tooMany.status === 400, `status=${tooMany.status}`);
+  const longWorld = await post('/api/roles/pack', { id: 'hazuki', aliases: [], worldName: 'w'.repeat(121) });
+  check('an over-long world name is refused', longWorld.status === 400, `status=${longWorld.status}`);
+  const noTarget = await post('/api/roles/pack', { id: 'missing', aliases: [], worldName: '' });
+  check('a pack for a missing card is refused', noTarget.status === 404, `status=${noTarget.status}`);
+  const packTraversal = await post('/api/roles/pack', { id: '../escape', aliases: [], worldName: '' });
+  check('a traversal id is refused on pack save', packTraversal.status === 400, `status=${packTraversal.status}`);
+
+  await post('/api/roles/rename', { id: 'hazuki', name: 'hazuki2' });
+  check('the pack follows a rename', fs.existsSync(path.join(prompts, 'hazuki2.pack.json')) && !fs.existsSync(path.join(prompts, 'hazuki.pack.json')), 'pack did not move');
+  await post('/api/roles/delete', { id: 'hazuki2' });
+  check('deleting a card removes its pack', !fs.existsSync(path.join(prompts, 'hazuki2.pack.json')), 'pack survived the delete');
 } catch (error) {
   check('acceptance harness ran', false, error.message);
 } finally {

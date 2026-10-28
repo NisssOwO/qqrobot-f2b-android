@@ -72,6 +72,44 @@ function scanRoles() {
     .map(id => ({ id, name: roleTitle(id), file: id + '.md' }));
 }
 
+const PACK_LIMITS = Object.freeze({ aliases: 32, aliasMax: 40, worldMax: 120 });
+
+function packFile(id) { return path.join(promptDir(), id + '.pack.json'); }
+
+// A role pack is optional metadata that lives beside the card. Anything malformed
+// in a hand-edited file falls back to empty values instead of breaking the panel.
+// voiceId/dictionary are preserved for shape compatibility with the desktop
+// edition; this build has no TTS, so they stay empty unless someone fills them.
+function readPack(id) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(packFile(id), 'utf8'));
+    const aliases = Array.isArray(raw.aliases)
+      ? [...new Set(raw.aliases.filter(a => typeof a === 'string').map(a => a.trim()).filter(Boolean))].slice(0, PACK_LIMITS.aliases)
+      : [];
+    return {
+      aliases,
+      worldName: typeof raw.worldName === 'string' ? raw.worldName.trim().slice(0, PACK_LIMITS.worldMax) : '',
+      voiceId: typeof raw.voiceId === 'string' ? raw.voiceId : '',
+      dictionary: raw.dictionary && typeof raw.dictionary === 'object' && !Array.isArray(raw.dictionary) ? raw.dictionary : {},
+    };
+  } catch { return { aliases: [], worldName: '', voiceId: '', dictionary: {} }; }
+}
+
+function writePack(id, patch) {
+  const previous = readPack(id);
+  const next = {
+    role: roleTitle(id),
+    roleFile: id + '.md',
+    voiceId: previous.voiceId,
+    dictionary: previous.dictionary,
+    aliases: patch.aliases,
+    worldName: patch.worldName,
+  };
+  fs.mkdirSync(promptDir(), { recursive: true });
+  atomicJson(packFile(id), next);
+  return next;
+}
+
 function roleStats(content) {
   // The browser normalises textarea values to LF, so count the same way the
   // editor does; otherwise a CRLF card reports a size the user cannot see.
@@ -313,6 +351,9 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         });
       }
       if (req.method === 'GET' && url.pathname === '/api/roles') {
+        // Rescan on every read: a card may have been edited, added or removed
+        // on the data volume by hand, and the cached list would hide that.
+        reloadRoles();
         return json(res, 200, { roles: roles.map(role => ({ ...role, ...roleStats(fs.readFileSync(path.join(promptDir(), role.file), 'utf8')) })), current: cfg.policy.defaultRole, limits: ROLE_LIMITS });
       }
       if (req.method === 'GET' && url.pathname === '/api/roles/content') {
@@ -321,7 +362,21 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         let content;
         try { content = fs.readFileSync(path.join(promptDir(), roleId + '.md'), 'utf8'); }
         catch { return json(res, 404, { error: `人格「${roleId}」不存在` }); }
-        return json(res, 200, { id: roleId, name: roleTitle(roleId), content, ...roleStats(content), limits: ROLE_LIMITS });
+        return json(res, 200, { id: roleId, name: roleTitle(roleId), content, ...roleStats(content), limits: ROLE_LIMITS, pack: readPack(roleId) });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/roles/pack') {
+        const input = await body(req);
+        const roleId = String(input.id ?? '').trim();
+        if (!safeRoleId(roleId)) return json(res, 400, { error: '角色 id 不合法' });
+        if (!fs.existsSync(path.join(promptDir(), roleId + '.md'))) return json(res, 404, { error: `人格「${roleId}」不存在` });
+        const raw = Array.isArray(input.aliases) ? input.aliases : String(input.aliases ?? '').split(/[,，、\n]/);
+        const aliases = [...new Set(raw.map(a => String(a).trim()).filter(Boolean))];
+        if (aliases.length > PACK_LIMITS.aliases) return json(res, 400, { error: `别名最多 ${PACK_LIMITS.aliases} 个` });
+        if (aliases.some(a => a.length > PACK_LIMITS.aliasMax)) return json(res, 400, { error: `单个别名最多 ${PACK_LIMITS.aliasMax} 个字符` });
+        const worldName = String(input.worldName ?? '').trim();
+        if (worldName.length > PACK_LIMITS.worldMax) return json(res, 400, { error: `世界观名最多 ${PACK_LIMITS.worldMax} 个字符` });
+        try { return json(res, 200, { ok: true, id: roleId, pack: writePack(roleId, { aliases, worldName }) }); }
+        catch (error) { return json(res, 500, { error: `保存角色包失败：${error.message}` }); }
       }
       if (req.method === 'POST' && url.pathname === '/api/roles/save') {
         const input = await body(req);
@@ -351,7 +406,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         const destination = path.join(promptDir(), to + '.md');
         if (!fs.existsSync(source)) return json(res, 404, { error: `人格「${from}」不存在` });
         if (fs.existsSync(destination)) return json(res, 409, { error: `人格「${to}」已存在` });
-        try { fs.renameSync(source, destination); } catch (error) { return json(res, 500, { error: `重命名失败：${error.message}` }); }
+        try { fs.renameSync(source, destination); try { fs.renameSync(packFile(from), packFile(to)); } catch {} } catch (error) { return json(res, 500, { error: `重命名失败：${error.message}` }); }
         reloadRoles();
         return json(res, 200, { ok: true, id: to, name: roleTitle(to) });
       }
@@ -362,7 +417,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         if (roleId === cfg.policy.defaultRole) return json(res, 409, { error: '不能删除正在使用的默认角色，请先切换默认角色' });
         const file = path.join(promptDir(), roleId + '.md');
         if (!fs.existsSync(file)) return json(res, 404, { error: `人格「${roleId}」不存在` });
-        try { fs.unlinkSync(file); } catch (error) { return json(res, 500, { error: `删除失败：${error.message}` }); }
+        try { fs.unlinkSync(file); try { fs.unlinkSync(packFile(roleId)); } catch {} } catch (error) { return json(res, 500, { error: `删除失败：${error.message}` }); }
         reloadRoles();
         return json(res, 200, { ok: true, deleted: roleId });
       }
