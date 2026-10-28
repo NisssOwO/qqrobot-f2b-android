@@ -80,11 +80,12 @@ jobs:
             -t "qqrobot:${QQROBOT_VERSION}" \
             ./rootfs-builder
           ls -lh qqrobot-arm64.tar
-          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          tar -tf qqrobot-arm64.tar > /tmp/modern-list.txt
+          grep -q '^manifest.json$' /tmp/modern-list.txt
           # With the containerd store buildx can emit a hybrid archive: a
           # docker-archive manifest.json whose Layers point into blobs/sha256/.
           # mk-v1-archive.mjs resolves both shapes, so only note it here.
-          if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
+          if grep -q '^blobs/' /tmp/modern-list.txt; then
             echo 'note: hybrid docker-archive with OCI blobs; the repack handles it'
           fi
 
@@ -107,18 +108,19 @@ jobs:
           mv qqrobot-arm64.tar qqrobot-modern.tar
           mv qqrobot-v1.tar qqrobot-arm64.tar
           ls -lh qqrobot-arm64.tar
-          tar -tf qqrobot-arm64.tar | head -8
-          if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
+          tar -tf qqrobot-arm64.tar > /tmp/v1-list.txt
+          sed -n '1,8p' /tmp/v1-list.txt
+          if grep -q '^blobs/' /tmp/v1-list.txt; then
             echo 'still an OCI layout; udocker would fail to load it'
             exit 1
           fi
-          if tar -tf qqrobot-arm64.tar | grep -qE '^[0-9a-f]{64}\.tar$'; then
+          if grep -qE '^[0-9a-f]{64}\.tar$' /tmp/v1-list.txt; then
             echo 'flat layer tars still present; udocker reads this as a broken image'
             exit 1
           fi
-          tar -tf qqrobot-arm64.tar | grep -q 'layer.tar' || { echo 'no per-layer layer.tar'; exit 1; }
-          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$' || { echo 'no manifest.json'; exit 1; }
-          tar -tf qqrobot-arm64.tar | grep -q '^repositories$' || { echo 'no repositories'; exit 1; }
+          grep -q 'layer.tar' /tmp/v1-list.txt || { echo 'no per-layer layer.tar'; exit 1; }
+          grep -q '^manifest.json$' /tmp/v1-list.txt || { echo 'no manifest.json'; exit 1; }
+          grep -q '^repositories$' /tmp/v1-list.txt || { echo 'no repositories'; exit 1; }
 
       - name: Load the archive for the smoke test
         shell: bash {0}
@@ -186,7 +188,8 @@ jobs:
           # The tarball was already written by the build step (type=docker).
           # udocker on the phone needs the docker-archive layout, not OCI.
           ls -lh qqrobot-arm64.tar
-          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
+          tar -tf qqrobot-arm64.tar > /tmp/final-list.txt
+          grep -q '^manifest.json$' /tmp/final-list.txt
           xz -6 -T0 qqrobot-arm64.tar
           ls -lh qqrobot-arm64.tar.xz
 
