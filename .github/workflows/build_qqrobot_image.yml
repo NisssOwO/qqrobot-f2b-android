@@ -47,7 +47,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Clone repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v3
