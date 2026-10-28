@@ -65,7 +65,11 @@ try {
   // config sits under blobs/sha256/. Move it to the root: the cleanup below
   // deletes any top-level directory it does not recognise, which would take
   // blobs/ - and the config inside it - with it.
-  const configFile = path.basename(found);
+  // udocker keys repoconfigs by file name and only indexes top-level *.json
+  // (docker.py:_load_structure), and _load_image_step2 looks the manifest's
+  // Config up verbatim -- so the config has to keep the .json suffix.
+  const base = path.basename(found);
+  const configFile = base.endsWith('.json') ? base : `${base}.json`;
   if (found !== configFile) fs.renameSync(path.join(work, found), path.join(work, configFile));
   if (!layers.length) throw new Error('the archive lists no layers');
 
