@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.0' }}
+  QQROBOT_VERSION: ${{ github.event.inputs.version || '0.2.7' }}
 
 jobs:
   build-image:
@@ -83,34 +83,39 @@ jobs:
           tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
           tar -tf qqrobot-arm64.tar | grep -vq '^blobs/' || { echo 'artifact is OCI, not docker-archive'; exit 1; }
 
-      - name: Repack with podman into a classic docker-archive
+      - name: Repack into a classic docker-archive
         shell: bash {0}
         run: |
           set -euxo pipefail
-          # udocker's DockerLocalFileAPI expects the old `docker save` layout:
-          # manifest.json + repositories + <layer-id>/{VERSION,json,layer.tar},
-          # with a parent chain inside every layer json.
-          #
-          # buildx's type=docker still writes OCI-style blobs/sha256 files, and
-          # skopeo's rewrite of that archive is silently incomplete: udocker
-          # prints "adding layer" for every layer but most .layer files never
-          # land in $HOME/.udocker/layers, so `udocker create` dies with
-          # "getting layers or json". podman writes the legacy layout with one
-          # directory per layer, which is exactly what udocker walks.
+          # udocker 1.3.17's DockerLocalFileAPI walks the pre-1.10 `docker save`
+          # layout: manifest.json + repositories + <layer-id>/{VERSION,json,layer.tar}.
+          # buildx writes OCI blobs, skopeo's default v2s2 drops most .layer files,
+          # podman writes flat <layer-id>.tar files, and even the docker daemon's
+          # own save now emits flat layer tars - all leave `udocker create` dead
+          # with "getting layers or json". skopeo --format v1 is the one producer
+          # that still writes per-layer directories with a parent chain.
           sudo apt-get update -qq
-          sudo apt-get install -y -qq podman
-          podman load -i qqrobot-arm64.tar
-          podman image ls --format '{{.Repository}}:{{.Tag}}'
-          podman save --format docker-archive -o qqrobot-legacy.tar "qqrobot:${QQROBOT_VERSION}"
-          mv qqrobot-legacy.tar qqrobot-arm64.tar
+          sudo apt-get install -y -qq skopeo
+          skopeo copy --format v1 \
+            oci-archive:qqrobot-arm64.tar \
+            "docker-archive:qqrobot-v1.tar:qqrobot:${QQROBOT_VERSION}"
+          mv qqrobot-v1.tar qqrobot-arm64.tar
           ls -lh qqrobot-arm64.tar
+          tar -tf qqrobot-arm64.tar | head -8
           if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
             echo 'still an OCI layout; udocker would fail to load it'
             exit 1
           fi
-          tar -tf qqrobot-arm64.tar | grep -q 'layer.tar'
-          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$'
-          tar -tf qqrobot-arm64.tar | grep -q '^repositories$'
+          # A flat <layer>.tar next to <layer>/layer.tar makes udocker's
+          # _get_saved_structure reject the whole archive, so demand the pure
+          # per-layer layout.
+          if tar -tf qqrobot-arm64.tar | grep -qE '^[0-9a-f]{64}\.tar$'; then
+            echo 'flat layer tars still present; udocker reads this as a broken image'
+            exit 1
+          fi
+          tar -tf qqrobot-arm64.tar | grep -q 'layer.tar' || { echo 'no per-layer layer.tar'; exit 1; }
+          tar -tf qqrobot-arm64.tar | grep -q '^manifest.json$' || { echo 'no manifest.json'; exit 1; }
+          tar -tf qqrobot-arm64.tar | grep -q '^repositories$' || { echo 'no repositories'; exit 1; }
 
       - name: Load the archive for the smoke test
         shell: bash {0}

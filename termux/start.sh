@@ -16,7 +16,7 @@
 #   QQROBOT_VERSION   镜像版本，默认 0.2.2
 set -eu
 
-VERSION="${QQROBOT_VERSION:-0.2.2}"
+VERSION="${QQROBOT_VERSION:-0.2.7}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"
 BIND="${QQROBOT_BIND:-127.0.0.1}"
 PORT="${QQROBOT_PORT:-38121}"
@@ -44,11 +44,17 @@ fi
 export UDOCKER_USE_PROOT_EXECUTABLE="$PREFIX/bin/proot"
 export UDOCKER_USE_CURL_EXECUTABLE="$PREFIX/bin/curl"
 export UDOCKER_DIR="$HOME/.udocker"
+# udocker stages its bind files under $TMPDIR; on Android /tmp does not exist, so
+# leaving it unset makes every run die with "invalid host volume path".
+export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
+mkdir -p "$TMPDIR"
 
 command -v udocker >/dev/null 2>&1 || die "未安装 udocker，先跑: bash install.sh"
 # 镜像名可能带仓库前缀（docker.io/library/… 或 localhost/…），取决于打包工具；
 # 直接问 udocker 实际导入了什么，不要按标签拼名字。
-IMG_REF="$(udocker images 2>/dev/null | awk -v v="$VERSION" 'NR>1 && $2 == v {print $1 ":" $2; exit}')"
+# udocker prints only the REPOSITORY column, so match on the ":<version>"
+# suffix rather than assuming a repository/tag column split.
+IMG_REF="$(udocker images 2>/dev/null | awk -v v="$VERSION" 'NR>1 { n = split($1, p, ":"); if (n == 2 && p[2] == v) { print $1; exit } }')"
 [ -n "$IMG_REF" ] || die "镜像 qqrobot:${VERSION} 不存在，先跑: bash install.sh"
 
 # --- 容器参数 ---------------------------------------------------------------
@@ -88,6 +94,7 @@ elif [ "$BIND" = "127.0.0.1" ]; then
   say "  想被局域网访问: QQROBOT_PASSWORD='口令' QQROBOT_BIND=0.0.0.0 bash start.sh"
 fi
 say "  首次启动会初始化配置并拉起 QQ/NapCat，约 1–2 分钟"
+say "  起来后打开上面的地址：页面顶部「开始使用」会带你扫码登录"
 say "  停止: 另开一个 Termux 会话执行 bash stop.sh"
 say ""
 

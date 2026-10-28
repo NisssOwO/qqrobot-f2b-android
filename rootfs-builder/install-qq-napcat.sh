@@ -26,8 +26,20 @@ rm -rf "$WORK"
 mkdir -p "$WORK" /root/Napcat/opt
 
 download() {  # $1=url  $2=out
-  curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 1800 \
-       -o "$2" "$1"
+  # The Tencent CDN drops long transfers now and then (curl 56). Retry across
+  # errors and resume from whatever already landed instead of starting over.
+  attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if curl -fL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+         --max-time 2400 -C - -o "$2" "$1"; then
+      return 0
+    fi
+    echo "download attempt $attempt failed for $1" >&2
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+  echo "giving up on $1" >&2
+  return 1
 }
 
 echo "==> [1/5] QQ deb: $QQ_DEB_URL"
