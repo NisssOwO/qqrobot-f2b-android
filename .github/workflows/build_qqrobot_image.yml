@@ -117,9 +117,14 @@ jobs:
         run: |
           set -euxo pipefail
           docker load -i qqrobot-arm64.tar
-          # skopeo keeps only the tag asked for on its command line, so restore
-          # the short alias the smoke test and the artifact use.
-          docker tag "qqrobot:${QQROBOT_VERSION}" qqrobot:arm64
+          docker image ls --format '{{.Repository}}:{{.Tag}}'
+          # podman records the repository as localhost/qqrobot, so the tag after
+          # a load is not necessarily qqrobot:<version>. Take whatever carries
+          # our version and give the smoke test the alias it looks for.
+          loaded="$(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F ":${QQROBOT_VERSION}" | head -1 || true)"
+          [ -n "$loaded" ] || { echo 'the archive did not load any tagged image'; exit 1; }
+          echo "loaded image: $loaded"
+          docker tag "$loaded" qqrobot:arm64
           docker image inspect qqrobot:arm64 --format '{{.Architecture}} {{.Os}} {{.Size}}'
 
       - name: Smoke-test the image (panel only; QQ skipped under QEMU)
