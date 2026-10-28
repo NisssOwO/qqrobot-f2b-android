@@ -44,6 +44,10 @@ fi
 export UDOCKER_USE_PROOT_EXECUTABLE="$PREFIX/bin/proot"
 export UDOCKER_USE_CURL_EXECUTABLE="$PREFIX/bin/curl"
 export UDOCKER_DIR="$HOME/.udocker"
+# udocker stages its bind files under $TMPDIR; on Android /tmp does not exist, so
+# leaving it unset makes every run die with "invalid host volume path".
+export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
+mkdir -p "$TMPDIR"
 
 command -v udocker >/dev/null 2>&1 || die "未安装 udocker，先跑: bash install.sh"
 # 镜像名可能带仓库前缀（docker.io/library/… 或 localhost/…），取决于打包工具；
@@ -90,6 +94,7 @@ elif [ "$BIND" = "127.0.0.1" ]; then
   say "  想被局域网访问: QQROBOT_PASSWORD='口令' QQROBOT_BIND=0.0.0.0 bash start.sh"
 fi
 say "  首次启动会初始化配置并拉起 QQ/NapCat，约 1–2 分钟"
+say "  起来后打开上面的地址：页面顶部「开始使用」会带你扫码登录"
 say "  停止: 另开一个 Termux 会话执行 bash stop.sh"
 say ""
 
