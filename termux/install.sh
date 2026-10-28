@@ -33,6 +33,20 @@ export UDOCKER_USE_PROOT_EXECUTABLE="${UDOCKER_USE_PROOT_EXECUTABLE:-$PREFIX/bin
 export UDOCKER_USE_CURL_EXECUTABLE="${UDOCKER_USE_CURL_EXECUTABLE:-$PREFIX/bin/curl}"
 export UDOCKER_DIR="${UDOCKER_DIR:-$HOME/.udocker}"
 
+# udocker 先在 Config.conf["root_path"] 里查找外部命令，默认
+# "/usr/sbin:/sbin:/usr/bin:/bin"。Android 上 /bin/tar 是 toybox 的软链，它
+# 不认识 --delay-directory-restore 等 GNU 参数，于是 load 阶段解压直接失败，
+# 只留下一句 "Error: failed to extract container"。把 root_path 指到 Termux
+# 自己的 bin，udocker 才会用到真正的 GNU tar。
+# 用户配置只读 [DEFAULT] 段，写成别的段落不会生效。
+mkdir -p "$UDOCKER_DIR"
+if ! grep -qs '^root_path' "$UDOCKER_DIR/udocker.conf" 2>/dev/null; then
+  cat > "$UDOCKER_DIR/udocker.conf" <<EOF
+[DEFAULT]
+root_path = $PREFIX/bin
+EOF
+fi
+
 say "版本 $VERSION  数据目录 $DATA_DIR"
 
 case "$(uname -m)" in
@@ -118,7 +132,12 @@ fi
 if udocker ps 2>/dev/null | grep -q 'qqrobot'; then
   say "容器已存在，跳过创建"
 else
-  udocker create --name=qqrobot "qqrobot:${VERSION}" || die "udocker create 失败"
+  # 镜像名取决于打包方式：可能是 qqrobot:0.2.2、docker.io/library/qqrobot:0.2.2
+  # 或 localhost/qqrobot:0.2.2。直接问 udocker 实际导入了什么，别猜。
+  IMG_REF="$(udocker images 2>/dev/null | awk -v v="$VERSION" 'NR>1 && $2 == v {print $1 ":" $2; exit}')"
+  [ -n "$IMG_REF" ] || IMG_REF="qqrobot:${VERSION}"
+  say "用镜像 $IMG_REF 建容器"
+  udocker create --name=qqrobot "$IMG_REF" || die "udocker create 失败"
 fi
 
 say ""
