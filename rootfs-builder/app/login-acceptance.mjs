@@ -92,6 +92,15 @@ try {
       req.on('error', reject); req.end('{}');
     });
     check('POST /api/login/refresh with token and no QQ returns 409', withToken.status === 409, `status=${withToken.status} ${withToken.body.slice(0, 80)}`);
+
+    // Logging out without a running QQ must not touch anything either.
+    const logout = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/login/logout', method: 'POST', headers: { 'content-type': 'application/json', 'x-lab-token': tokenMatch[1] } }, res => {
+        const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      });
+      req.on('error', reject); req.end('{}');
+    });
+    check('POST /api/login/logout with no QQ returns 409', logout.status === 409, `status=${logout.status} ${logout.body.slice(0, 80)}`);
   } else {
     check('page token is injected', false, 'token pattern not found');
   }
