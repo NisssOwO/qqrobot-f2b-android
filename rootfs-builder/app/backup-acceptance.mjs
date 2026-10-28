@@ -26,7 +26,7 @@ export async function runBackupAcceptance({ check, makeDir }) {
       const secret = 'synthetic-credential-exclusion-7391';
       const configFile = path.join(source, 'config.json'); const cfg = JSON.parse(fs.readFileSync(configFile)); cfg.apiKey = secret; fs.writeFileSync(configFile, JSON.stringify(cfg));
       fs.writeFileSync(path.join(source, 'model-config.json'), JSON.stringify({ apiKey: secret }));
-      fs.mkdirSync(path.join(source, '.runtime')); fs.writeFileSync(path.join(source, '.runtime/control.json'), JSON.stringify({ token: secret }));
+      fs.mkdirSync(path.join(source, '.runtime'), { recursive: true }); fs.writeFileSync(path.join(source, '.runtime/control.json'), JSON.stringify({ token: secret }));
       bundle = captureData(source, options);
       assert.ok(bundle.files.every(file => !Buffer.from(file.data, 'base64').toString().includes(secret)));
       assert.ok(!bundle.files.some(file => /model-config|control|service\.log/.test(file.path)));

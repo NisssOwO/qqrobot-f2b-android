@@ -28,7 +28,64 @@ function gatewayConfig(raw, selfId) {
 }
 
 export const ROOT = path.dirname(fileURLToPath(import.meta.url));
-export const roles = JSON.parse(fs.readFileSync(path.join(ROOT, 'resources/roles.json'), 'utf8'));
+// Role cards (人格卡) live on the data volume so edits survive a container
+// rebuild; the copy inside the image is only the first-boot seed. The directory
+// is resolved per call so the acceptance harness, which has no /data, keeps
+// reading the seed copy.
+const PROMPTS_DIR = process.env.QQROBOT_PROMPTS_DIR || '/data/prompts';
+const SEED_PROMPTS_DIR = path.join(ROOT, 'resources/prompts');
+const ROLE_LIMITS = Object.freeze({ nameMax: 40, contentMaxBytes: 65536, injectMaxChars: 8000 });
+// text-chat.md is the agent preset prompt, not a persona.
+const NOT_A_ROLE = new Set(['text-chat']);
+
+function promptDir() {
+  try { fs.accessSync(PROMPTS_DIR, fs.constants.W_OK); return PROMPTS_DIR; } catch { return SEED_PROMPTS_DIR; }
+}
+
+// The display name is the first line of the card ("# 角色卡：七草日花（七草にちか）").
+// The seed cards are checked out with CRLF on Windows, and `.` never matches a
+// line terminator, so the trailing \r has to go before the heading is matched.
+function roleTitle(id) {
+  try {
+    const head = fs.readFileSync(path.join(promptDir(), id + '.md'), 'utf8').split('\n', 1)[0].replace(/\r$/, '');
+    const match = /^#\s*角色卡[：:]\s*(.+)$/.exec(head);
+    if (match) return match[1].replace(/[（(][^）)]*[）)]\s*$/, '').trim() || id;
+  } catch {}
+  return id;
+}
+
+// A role id becomes a file name, so it must not carry separators or control
+// characters (and it has to stay inside the prompts directory).
+function safeRoleId(id) {
+  return typeof id === 'string' && id.length >= 1 && id.length <= ROLE_LIMITS.nameMax
+    && !/[/\\\x00-\x1f]/.test(id) && id !== '.' && id !== '..';
+}
+
+function scanRoles() {
+  let names;
+  try { names = fs.readdirSync(promptDir()); } catch { return []; }
+  return names
+    .filter(name => name.endsWith('.md'))
+    .map(name => name.slice(0, -3))
+    .filter(id => safeRoleId(id) && !NOT_A_ROLE.has(id))
+    .sort()
+    .map(id => ({ id, name: roleTitle(id), file: id + '.md' }));
+}
+
+function roleStats(content) {
+  // The browser normalises textarea values to LF, so count the same way the
+  // editor does; otherwise a CRLF card reports a size the user cannot see.
+  const text = String(content ?? '').replace(/\r\n/g, '\n');
+  return {
+    chars: text.length,
+    bytes: Buffer.byteLength(text, 'utf8'),
+    lines: text.split('\n').length,
+    truncated: text.length > ROLE_LIMITS.injectMaxChars,
+    excerpt: text.split('\n').find(line => line.trim() && !line.trim().startsWith('#'))?.trim().slice(0, 80) ?? '',
+  };
+}
+
+export let roles = scanRoles();
 const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 // The QQ process and its NapCat payload only exist inside the container image.
 // Both are resolved at request time from the environment so the same build runs
@@ -95,7 +152,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   const gateway = gatewayConfig(cfg, cfg.policy.selfId);
   if (gateway) atomicJson(configFile, { ...cfg, gateway });
   const quiet = new QuietHours({ config: cfg.quietHours, stateDir: dataDir });
-  const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory, onChange: cfg => applyReplyModel(cfg) });
+  const preview = createModelPreview({ root: ROOT, dataDir, roleIds: roles.map(r => r.id), chatFactory: previewChatFactory, onChange: cfg => applyReplyModel(cfg), promptFor: () => ({ promptDir: promptDir(), injectMaxChars: ROLE_LIMITS.injectMaxChars }) });
   // The page token only guards same-origin form posts. Keep it on disk so that a
   // backend restart (for example when the gateway reconnects) does not invalidate
   // every panel already open in a browser.
@@ -108,6 +165,15 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
     fs.writeFileSync(tokenFile, token, { mode: 0o600 });
   }
   let origin, chat, bridge, onebotPort = null, receiptCounter = 0, switching = false;
+
+  // Editing a role card writes the file that every reply re-reads, so an edit is
+  // live without restarting a session. The policy layer caches the accepted ids
+  // at construction time though, so hand it the fresh list after a change.
+  function reloadRoles() {
+    roles = scanRoles();
+    if (bridge) bridge.roleIds = roles.map(r => r.id);
+    return roles;
+  }
   const modelRequests = [];
   function json(res, status, data) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); }
 
@@ -182,7 +248,14 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         const input = await body(req, 2097152); modelRequests.push(input); if (modelRequests.length > 12) modelRequests.shift();
         if (fixtureModel) return json(res, 200, await fixtureModel(input));
         const system = input.messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
-        const role = roles.find(r => system.includes(fs.readFileSync(path.join(ROOT, 'resources/prompts', r.id + '.md'), 'utf8').trim()))?.name || '未识别角色';
+        // Match on the head of the card: the injected prompt is LF-normalised and
+        // possibly truncated, so comparing the whole raw file never matches.
+        const role = roles.find(r => {
+          try {
+            const card = fs.readFileSync(path.join(promptDir(), r.id + '.md'), 'utf8').replace(/\r\n/g, '\n').trim();
+            return card.length > 0 && typeof system === 'string' && system.includes(card.slice(0, 200));
+          } catch { return false; }
+        })?.name || '未识别角色';
         const users = input.messages.filter(m => m.role === 'user');
         return json(res, 200, { choices: [{ message: { role: 'assistant', content: `【模拟·${role}】第${users.length}轮：${users.at(-1).content}；首条：${users[0].content}` } }] });
       }
@@ -238,6 +311,60 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
             ? `已退出登录（清除 ${removed} 个账号数据）；QQ 正在重启，请重新扫码`
             : 'QQ 已停止；没有找到已保存的登录态，重启后会直接给出二维码',
         });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/roles') {
+        return json(res, 200, { roles: roles.map(role => ({ ...role, ...roleStats(fs.readFileSync(path.join(promptDir(), role.file), 'utf8')) })), current: cfg.policy.defaultRole, limits: ROLE_LIMITS });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/roles/content') {
+        const roleId = url.searchParams.get('id') || '';
+        if (!safeRoleId(roleId)) return json(res, 400, { error: '角色 id 不合法' });
+        let content;
+        try { content = fs.readFileSync(path.join(promptDir(), roleId + '.md'), 'utf8'); }
+        catch { return json(res, 404, { error: `人格「${roleId}」不存在` }); }
+        return json(res, 200, { id: roleId, name: roleTitle(roleId), content, ...roleStats(content), limits: ROLE_LIMITS });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/roles/save') {
+        const input = await body(req);
+        const current = String(input.id ?? '').trim();
+        const name = String(input.name ?? '').trim();
+        const content = String(input.content ?? '');
+        const target = current || name;
+        if (!safeRoleId(target)) return json(res, 400, { error: `人格名需为 1–${ROLE_LIMITS.nameMax} 个字符，且不能包含 / \\ 等路径字符` });
+        if (Buffer.byteLength(content, 'utf8') > ROLE_LIMITS.contentMaxBytes) return json(res, 400, { error: '人格卡超过 64 KB 上限' });
+        const file = path.join(promptDir(), target + '.md');
+        if (!current && fs.existsSync(file)) return json(res, 409, { error: `人格「${target}」已存在` });
+        try {
+          fs.mkdirSync(promptDir(), { recursive: true });
+          fs.writeFileSync(file, content, 'utf8');
+        } catch (error) { return json(res, 500, { error: `保存失败：${error.message}` }); }
+        reloadRoles();
+        const warnings = content.length > ROLE_LIMITS.injectMaxChars
+          ? [`超过注入上限 ${ROLE_LIMITS.injectMaxChars} 字符，超出部分不会发给模型`] : [];
+        return json(res, 200, { ok: true, id: target, name: roleTitle(target), ...roleStats(content), warnings });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/roles/rename') {
+        const input = await body(req);
+        const from = String(input.id ?? '').trim();
+        const to = String(input.name ?? '').trim();
+        if (!safeRoleId(from) || !safeRoleId(to)) return json(res, 400, { error: '人格名不合法' });
+        const source = path.join(promptDir(), from + '.md');
+        const destination = path.join(promptDir(), to + '.md');
+        if (!fs.existsSync(source)) return json(res, 404, { error: `人格「${from}」不存在` });
+        if (fs.existsSync(destination)) return json(res, 409, { error: `人格「${to}」已存在` });
+        try { fs.renameSync(source, destination); } catch (error) { return json(res, 500, { error: `重命名失败：${error.message}` }); }
+        reloadRoles();
+        return json(res, 200, { ok: true, id: to, name: roleTitle(to) });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/roles/delete') {
+        const input = await body(req);
+        const roleId = String(input.id ?? '').trim();
+        if (!safeRoleId(roleId)) return json(res, 400, { error: '角色 id 不合法' });
+        if (roleId === cfg.policy.defaultRole) return json(res, 409, { error: '不能删除正在使用的默认角色，请先切换默认角色' });
+        const file = path.join(promptDir(), roleId + '.md');
+        if (!fs.existsSync(file)) return json(res, 404, { error: `人格「${roleId}」不存在` });
+        try { fs.unlinkSync(file); } catch (error) { return json(res, 500, { error: `删除失败：${error.message}` }); }
+        reloadRoles();
+        return json(res, 200, { ok: true, deleted: roleId });
       }
       if (req.method === 'GET' && url.pathname === '/api/backups') return json(res, 200, { backups: listBackups(dataDir) });
       if (url.pathname.startsWith('/api/restore') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '恢复操作需要当前管理页面凭据' });
@@ -308,7 +435,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   // origin is only used for same-origin URL parsing and the internal fixture
   // baseUrl; keep it loopback so proxy/chat traffic never leaves the host.
   origin = `http://127.0.0.1:${boundPort}`;
-  chat = createConversation({ root: ROOT, dataDir, baseUrl: origin + '/fixture/v1', apiKey: token });
+  chat = createConversation({ root: ROOT, dataDir, baseUrl: origin + '/fixture/v1', apiKey: token, promptDir: promptDir(), injectMaxChars: ROLE_LIMITS.injectMaxChars });
   // The QQ reply path prefers the model configured in the panel and falls back
   // to the built-in fixture so the bot still answers when nothing is set. The
   // switch happens on configure/clear, never silently in the middle of a reply.
@@ -324,7 +451,7 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
   }
   function replyConversation() {
     if (!replyModel) return chat;
-    replyChat ??= (previewChatFactory ?? createConversation)({ root: ROOT, dataDir, baseUrl: replyModel.baseUrl, apiKey: replyModel.apiKey, model: replyModel.model, timeoutMs: 60000 });
+    replyChat ??= (previewChatFactory ?? createConversation)({ root: ROOT, dataDir, baseUrl: replyModel.baseUrl, apiKey: replyModel.apiKey, model: replyModel.model, timeoutMs: 60000, promptDir: promptDir(), injectMaxChars: ROLE_LIMITS.injectMaxChars });
     return replyChat;
   }
   applyReplyModel(preview.current());

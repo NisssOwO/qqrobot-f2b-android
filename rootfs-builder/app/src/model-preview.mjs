@@ -13,7 +13,10 @@ export function validateModelConfig(raw, previous = null) {
   if (previous && raw.apiKey === '' && url.href.replace(/\/$/, '') !== previous.baseUrl) throw new TypeError('更换地址时必须重新填写密钥');
   return { baseUrl: url.href.replace(/\/$/, ''), model: raw.model, apiKey, revision: randomBytes(12).toString('hex') };
 }
-export function createModelPreview({ root, dataDir, roleIds, chatFactory = createConversation, onChange = null }) {
+// promptFor() hands the caller a chance to point the preview at the editable
+// role cards on the data volume instead of the ones baked into the image.
+export function createModelPreview({ root, dataDir, roleIds, chatFactory = createConversation, onChange = null, promptFor = null }) {
+  const roleOptions = () => (promptFor ? promptFor() : {});
   const file = path.join(dataDir, 'model-config.json');
   let config = null, chat = null, busy = false;
   const guard = globalThis[Symbol.for('qqrobot.termux.c.guard')];
@@ -57,7 +60,7 @@ export function createModelPreview({ root, dataDir, roleIds, chatFactory = creat
       if (!roleIds.includes(role) || typeof text !== 'string' || !text.trim() || text.length > 8000) throw new Error('角色或文字无效');
       busy = true;
       try {
-        chat ??= chatFactory({ root, dataDir: path.join(dataDir, 'model-preview', config.revision), baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, timeoutMs: 60000 });
+        chat ??= chatFactory({ root, dataDir: path.join(dataDir, 'model-preview', config.revision), baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, timeoutMs: 60000, ...roleOptions() });
         const reply = await chat.reply({ scene: 'private', peerId: '1', senderId: '1', role, text });
         if (typeof reply !== 'string' || !reply.trim() || reply.length > 16000 || reply.includes(config.apiKey)) throw new Error('Invalid model reply');
         return { reply, role, scope: 'local-preview-only', qqSent: false };
@@ -75,7 +78,7 @@ export function createModelPreview({ root, dataDir, roleIds, chatFactory = creat
         fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
         temporary = fs.mkdtempSync(path.join(dataDir, 'model-once-'));
         egress(once.baseUrl);
-        onceChat = chatFactory({ root, dataDir: temporary, baseUrl: once.baseUrl, apiKey: once.apiKey, model: once.model, timeoutMs: 60000 });
+        onceChat = chatFactory({ root, dataDir: temporary, baseUrl: once.baseUrl, apiKey: once.apiKey, model: once.model, timeoutMs: 60000, ...roleOptions() });
         const reply = await onceChat.reply({ scene: 'private', peerId: '1', senderId: '1', role, text });
         if (typeof reply !== 'string' || !reply.trim() || reply.length > 16000 || reply.includes(once.apiKey)) throw new Error('Invalid model reply');
         return { reply, role, scope: 'one-shot-local-preview', qqSent: false, keySaved: false, upstreamRequests: (guard?.explicitModelFetches ?? 0) - attemptsBefore };

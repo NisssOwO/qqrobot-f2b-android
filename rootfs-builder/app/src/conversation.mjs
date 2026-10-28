@@ -5,13 +5,29 @@ import { unwrap } from './backend/rpc.mjs';
 import { atomicJson } from './gateway/text-bridge.mjs';
 
 const noTools = Object.freeze({ list: async () => [], call: async () => { throw new Error('Local tools disabled'); }, toOpenAiTool: () => { throw new Error('No tools'); }, dispose: async () => {} });
-export function createConversation({ root, dataDir, baseUrl, apiKey, model = 'local-fixture', timeoutMs = 15000 }) {
+// The card is injected whole, so a runaway edit could silently blow the model
+// context. Cut on a line boundary and keep the top of the card, where the
+// identity and speech rules live.
+function truncateRole(text, max) {
+  // Cards checked out on Windows carry CRLF; the model only ever needs LF.
+  const body = String(text).replace(/\r\n/g, '\n');
+  if (!max || body.length <= max) return body;
+  const kept = [];
+  let used = 0;
+  for (const line of body.split('\n')) {
+    if (used + line.length + 1 > max) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.join('\n').trimEnd();
+}
+export function createConversation({ root, dataDir, baseUrl, apiKey, model = 'local-fixture', timeoutMs = 15000, promptDir = path.join(root, 'resources/prompts'), injectMaxChars = 0 }) {
   const mappingFile = path.join(dataDir, 'conversations.json');
   const mapping = fs.existsSync(mappingFile) ? JSON.parse(fs.readFileSync(mappingFile, 'utf8')) : {};
   const pending = new Map();
   const controller = new AbortController();
   let failed = false;
-  const backend = createStandaloneBackend({ stateDir: dataDir, llm: { baseUrl, apiKey, model, timeoutMs: timeoutMs - 1000 } }, { tools: noTools, promptDir: path.join(root, 'resources/prompts') });
+  const backend = createStandaloneBackend({ stateDir: dataDir, llm: { baseUrl, apiKey, model, timeoutMs: timeoutMs - 1000 } }, { tools: noTools, promptDir });
   const pump = (async () => {
     for await (const { payload } of backend.events.mux({ signal: controller.signal })) {
       if (payload.type !== 'session/event') continue;
@@ -35,7 +51,7 @@ export function createConversation({ root, dataDir, baseUrl, apiKey, model = 'lo
         mapping[key] = sessionId; atomicJson(mappingFile, mapping);
       }
       const sessionId = mapping[key];
-      const role = fs.readFileSync(path.join(root, 'resources/prompts', event.role + '.md'), 'utf8');
+      const role = truncateRole(fs.readFileSync(path.join(promptDir, event.role + '.md'), 'utf8'), injectMaxChars);
       backend.events.follow(sessionId);
       const answer = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {

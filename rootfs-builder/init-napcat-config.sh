@@ -42,6 +42,15 @@ fi
 [ -L /root/.config/QQ ] || ln -s "${QQ_USER_DATA}" /root/.config/QQ
 echo "linked QQ user data -> ${QQ_USER_DATA}"
 
+# 1b) 人格卡（角色卡）→ 数据卷。面板里改过的人格卡要能跨容器重建保留，
+#     所以后端读写 ${DATA}/prompts，镜像里的那份只是首启种子。
+PROMPTS="${DATA}/prompts"
+mkdir -p "${PROMPTS}"
+if [ -z "$(ls -A "${PROMPTS}" 2>/dev/null)" ]; then
+  cp -a /root/qqrobot-app/resources/prompts/. "${PROMPTS}/" 2>/dev/null || true
+  echo "seeded role cards -> ${PROMPTS}"
+fi
+
 # 2) OneBot 握手 token：与后端 config.json 保持一致
 #    优先级: 已有 config.json 的 gateway.token > token 文件 > 新生成
 TOKEN_FILE="${DATA}/onebot-token.txt"
