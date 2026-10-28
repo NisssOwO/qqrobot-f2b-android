@@ -14,7 +14,7 @@
 # 数据目录: $HOME/qqrobot-data （config、QQ 登录态、NapCat 配置都在这）
 set -eu
 
-VERSION="${QQROBOT_VERSION:-0.2.1}"
+VERSION="${QQROBOT_VERSION:-0.2.2}"
 REPO="${QQROBOT_REPO:-NisssOwO/qqrobot-f2b-android}"
 PROXY="${QQROBOT_PROXY:-https://gh-proxy.com/}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"

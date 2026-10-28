@@ -13,10 +13,10 @@
 #   QQ_ACCOUNT        机器人 QQ 号，默认 3836367204
 #   GROUP_ALLOW       允许的群号，默认 620765931
 #   QQROBOT_DATA_DIR  数据目录，默认 $HOME/qqrobot-data
-#   QQROBOT_VERSION   镜像版本，默认 0.2.1
+#   QQROBOT_VERSION   镜像版本，默认 0.2.2
 set -eu
 
-VERSION="${QQROBOT_VERSION:-0.2.1}"
+VERSION="${QQROBOT_VERSION:-0.2.2}"
 DATA_DIR="${QQROBOT_DATA_DIR:-$HOME/qqrobot-data}"
 BIND="${QQROBOT_BIND:-127.0.0.1}"
 PORT="${QQROBOT_PORT:-38121}"
@@ -46,7 +46,10 @@ export UDOCKER_USE_CURL_EXECUTABLE="$PREFIX/bin/curl"
 export UDOCKER_DIR="$HOME/.udocker"
 
 command -v udocker >/dev/null 2>&1 || die "未安装 udocker，先跑: bash install.sh"
-udocker images 2>/dev/null | grep -q "qqrobot:${VERSION}" || die "镜像 qqrobot:${VERSION} 不存在，先跑: bash install.sh"
+# 镜像名可能带仓库前缀（docker.io/library/… 或 localhost/…），取决于打包工具；
+# 直接问 udocker 实际导入了什么，不要按标签拼名字。
+IMG_REF="$(udocker images 2>/dev/null | awk -v v="$VERSION" 'NR>1 && $2 == v {print $1 ":" $2; exit}')"
+[ -n "$IMG_REF" ] || die "镜像 qqrobot:${VERSION} 不存在，先跑: bash install.sh"
 
 # --- 容器参数 ---------------------------------------------------------------
 # 注意: udocker 的 proot 模式复用宿主网络栈，没有 --publish/-p 端口映射，
@@ -75,7 +78,7 @@ fi
 LAN_IP="$(ifconfig 2>/dev/null | awk '/^wlan0/{found=1} found && /inet /{print $2; exit}' | cut -d/ -f1)"
 [ -z "$LAN_IP" ] && LAN_IP="$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
 
-say "启动 qqrobot:${VERSION}"
+say "启动 $IMG_REF"
 say "  绑定: ${BIND}:${PORT}$([ -n "$PASSWORD" ] && echo '  (需要登录口令)' || echo '  (仅本机)')"
 say "  数据: $DATA_DIR"
 if [ "$BIND" = "0.0.0.0" ] && [ -n "$LAN_IP" ]; then
@@ -89,4 +92,4 @@ say "  停止: 另开一个 Termux 会话执行 bash stop.sh"
 say ""
 
 # --rm: 退出后自动删容器，避免堆积匿名容器
-exec udocker run --rm "${run_args[@]}" "qqrobot:${VERSION}"
+exec udocker run --rm "${run_args[@]}" "$IMG_REF"
