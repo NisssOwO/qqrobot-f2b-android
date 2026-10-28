@@ -97,13 +97,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
           skopeo copy --format v1 \
-            docker-archive:qqrobot-arm64.tar \
+            oci-archive:qqrobot-arm64.tar \
             "docker-archive:qqrobot-v1.tar:qqrobot:${QQROBOT_VERSION}"
           mv qqrobot-v1.tar qqrobot-arm64.tar
           ls -lh qqrobot-arm64.tar
           tar -tf qqrobot-arm64.tar | head -8
           if tar -tf qqrobot-arm64.tar | grep -q '^blobs/'; then
             echo 'still an OCI layout; udocker would fail to load it'
+            exit 1
+          fi
+          # A flat <layer>.tar next to <layer>/layer.tar makes udocker's
+          # _get_saved_structure reject the whole archive, so demand the pure
+          # per-layer layout.
+          if tar -tf qqrobot-arm64.tar | grep -qE '^[0-9a-f]{64}\.tar$'; then
+            echo 'flat layer tars still present; udocker reads this as a broken image'
             exit 1
           fi
           tar -tf qqrobot-arm64.tar | grep -q 'layer.tar' || { echo 'no per-layer layer.tar'; exit 1; }
