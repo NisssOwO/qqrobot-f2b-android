@@ -36,6 +36,9 @@ const appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), '
 // they do not — the login panel then simply reports "no QR code yet").
 const QQ_BIN_PATH = process.env.QQ_BIN || '/root/Napcat/opt/QQ/qq';
 const NAPCAT_QR_PATH = process.env.NAPCAT_QR_PATH || path.join(path.dirname(QQ_BIN_PATH), 'resources/app/app_launcher/napcat/cache/qrcode.png');
+// QQ keeps its credential store here (symlinked to the data volume); the
+// per-account nt_qq_* directories are what make a silent re-login possible.
+const QQ_USER_DATA_DIR = process.env.QQ_USER_DATA || '/data/qq-user-data';
 // pgrep is unreliable inside a proot container (it needs /proc metadata the
 // emulation does not expose), so question /proc directly — under udocker the
 // container's /proc is the host's, which is exactly what we want to know.
@@ -210,6 +213,31 @@ export async function createApplication({ dataDir = path.join(ROOT, 'data'), ser
         for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); signalled += 1; } catch { /* already gone */ } }
         if (signalled === 0) return json(res, 500, { error: '结束 QQ 进程失败' });
         return json(res, 202, { accepted: true, killed: signalled, note: 'QQ 正在重启，约 30-60 秒后生成新二维码；期间请勿关闭容器' });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/login/logout') {
+        const pids = qqPids();
+        if (pids.length === 0) return json(res, 409, { error: 'QQ 没有在运行，无需退出登录' });
+        let signalled = 0;
+        for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); signalled += 1; } catch { /* already gone */ } }
+        if (signalled === 0) return json(res, 500, { error: '结束 QQ 进程失败' });
+        // Give QQ a moment to flush and exit before deleting its credential
+        // store, so we do not leave a half-written profile behind.
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        let removed = 0;
+        try {
+          for (const name of fs.readdirSync(QQ_USER_DATA_DIR)) {
+            if (!name.startsWith('nt_qq_')) continue;
+            try { fs.rmSync(path.join(QQ_USER_DATA_DIR, name), { recursive: true, force: true }); removed += 1; } catch { /* locked file */ }
+          }
+        } catch { /* no store yet */ }
+        return json(res, 202, {
+          accepted: true,
+          killed: signalled,
+          removed,
+          note: removed
+            ? `已退出登录（清除 ${removed} 个账号数据）；QQ 正在重启，请重新扫码`
+            : 'QQ 已停止；没有找到已保存的登录态，重启后会直接给出二维码',
+        });
       }
       if (req.method === 'GET' && url.pathname === '/api/backups') return json(res, 200, { backups: listBackups(dataDir) });
       if (url.pathname.startsWith('/api/restore') && (req.headers['x-lab-token'] !== token || (req.headers.origin && req.headers.origin !== origin))) return json(res, 403, { error: '恢复操作需要当前管理页面凭据' });
